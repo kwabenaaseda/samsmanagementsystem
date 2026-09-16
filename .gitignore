@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Editor / IDE
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---------------------------------------------------------------------------
+# clasp local credentials -- NEVER commit these
+# clasp v3 keeps them in the home dir (~/.clasprc.json), but a project-local
+# copy is created by `clasp login --creds <file>`. Ignore both just in case.
+# ---------------------------------------------------------------------------
+.clasprc.json
+.clasprc.json.*
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# ---------------------------------------------------------------------------
+# Node (only if local dev tooling is added later)
+# ---------------------------------------------------------------------------
+node_modules/
+package-lock.json
+
+# ---------------------------------------------------------------------------
+# NOTE: deliberately NOT ignored, these are required to build/push:
+#   .clasp.json      -> scriptId that `clasp push` targets
+#   appsscript.json  -> Apps Script manifest (defines the web app)
+#   .claspignore     -> push filters (add this file when you need it)
+# ---------------------------------------------------------------------------
