@@ -16,9 +16,9 @@ Apps Script Web App backend serving a single `doGet` / `doPost` JSON API.
 | --- | --- | --- |
 | `appsscript.json` | Manifest (runtime, web app access, timezone) | complete |
 | `.clasp.json` | clasp target config (`scriptId`, extensions) | complete |
-| `Config.js` | `CONFIG` object: sheet ID + `CONFIG.SHEETS` name map | complete |
-| `Router.js` | `doGet(e)` / `doPost(e)` entry points | stub-level (echoes body) |
-| `Response.js` | `success()`, `failure()`, `jsonResponse()` envelopes | complete |
+| `Config.js` | Central `CONFIG`: spreadsheet ID, sheet names, enums, action names | Phase 1 complete |
+| `Router.js` | Action dispatcher (`doGet`/`doPost`), route table, `health` action | Phase 1 complete |
+| `Response.js` | `success()`, `failure()`, `jsonResponse()` + error-code taxonomy | Phase 1 complete |
 | `Auth.js` | login / session / credential checks | **empty stub** |
 | `Permissions.js` | role + permission resolution | **empty stub** |
 | `Audit.js` | append-only audit logging | **empty stub** |
@@ -31,7 +31,7 @@ Apps Script Web App backend serving a single `doGet` / `doPost` JSON API.
 | `Salaries.js` | salary payments | **empty stub** |
 | `Delegations.js` | delegated permissions | **empty stub** |
 | `Dashboard.js` | aggregate/reporting endpoints | **empty stub** |
-| `Utils.js` | shared helpers | **empty stub** |
+| `Utils.js` | Foundation helpers: sheet access, reads/writes, IDs, dates, validation | Phase 1 complete |
 
 "Empty stub" means the file currently contains only:
 
@@ -41,8 +41,23 @@ function myFunction() {
 }
 ```
 
-That is the Apps Script default placeholder, so these modules still need to be
-implemented.
+That is the Apps Script default placeholder. **12 business modules are still
+untouched at this level** and need implementing.
+
+## API shape (action-based, not REST)
+
+An Apps Script web app is one URL driven by `doGet`/`doPost`. It cannot serve
+path segments (`GET /students/:id`) or `PUT`/`DELETE` verbs, so REST routes
+cannot be expressed literally. The agreed equivalent:
+
+```
+GET  ?action=health
+POST {"action":"students.create","payload":{...}}
+```
+
+Responses are always HTTP 200, so the frontend branches on the application-level
+contract: `payload.success`, `payload.message`, `payload.data`, `payload.error`,
+`payload.details`.
 
 ## Sheet tabs referenced by `Config.js`
 
@@ -80,16 +95,56 @@ clasp login              # writes ~/.clasprc.json (git-ignored)
 clasp push               # .clasp.json supplies the scriptId
 ```
 
-## Known issues to resolve
+## Running the tests
 
-1. **`Config.js` evaluates at load time.** `SpreadsheetApp.getActiveSpreadsheet().getId()`
-   is executed at global scope on every script run. When the script is *not*
-   bound to a spreadsheet (web app request, time-driven trigger, standalone
-   execution) `getActiveSpreadsheet()` returns `null` and `.getId()` throws
-   `Cannot read properties of null (reading 'getId')`. Convert to a lazy
-   accessor or use `SpreadsheetApp.openById(...)`.
-2. **`doPost` is an echo, not a router.** It returns the parsed request body
-   with no action dispatch, validation, auth, or per-module routing.
-3. **Web app is not publicly reachable.** `access: MYSELF` + `executeAs:
-   USER_DEPLOYING` means only the owner can invoke the deployment.
-4. **13 module files are unimplemented stubs** (see table above).
+No test framework is used. There are two zero-dependency Node scripts:
+
+```bash
+node tests/backend.test.js      # 78 tests: config, utils, response, router, health
+node tests/claspignore.test.js  # 9 tests: proves frontend/ can never be pushed
+```
+
+`tests/backend.test.js` concatenates the backend files into one script and runs
+it in a Node `vm` context with stubs for the Google services, mirroring how Apps
+Script flattens files into a single global scope. This gives real feedback
+without a framework, network access, or a deployed script.
+
+`tests/claspignore.test.js` reads the real `.claspignore`, applies clasp's own
+matcher to a simulated repository containing a full Vite frontend, and asserts
+that only backend files would be pushed. It requires clasp installed locally,
+because it borrows clasp's bundled `micromatch`.
+
+## Why `.claspignore` exists
+
+Without it, clasp falls back to a built-in default that allows `*.js`, `*.ts`
+and `*.html` at **any depth**, and whose `node_modules/**` rule does **not**
+cover a nested `frontend/node_modules`. A React frontend in this repository
+would therefore have been uploaded into the Apps Script project — including its
+dependency tree.
+
+`.claspignore` ignores everything (`**/**`) and re-includes only root-level
+backend files, so nothing in `frontend/`, `tests/`, `docs/` or any
+`node_modules/` can ever be pushed.
+
+## Known issues / outstanding items
+
+1. **`clasp push` is currently blocked.** The Apps Script API write path returns
+   `403 NOT_AUTHORIZED` ("User has not enabled the Apps Script API"). Reads work
+   (`projects.get`/`getContent` return 200) but writes do not, so the Phase 1
+   code is committed locally but **not yet uploaded**. Fix: enable it at
+   <https://script.google.com/home/usersettings> — account owner, browser only.
+   No local change can work around this.
+2. **No git remote is configured**, so nothing can be pushed to GitHub yet:
+   `git remote add origin git@github.com:kwabenaaseda/samsmanagementsystem.git`
+3. **The web app is not publicly reachable.** `webapp.access: MYSELF` means only
+   the owner can invoke the deployment, so the `health` action cannot yet be
+   verified over HTTP from a browser or the frontend. Changing this needs
+   explicit approval; the React frontend will require `ANYONE`.
+4. **12 business modules are still untouched stubs** (see the table above).
+   Every `module.verb` action name in `CONFIG.ACTIONS` is a reserved identifier
+   only — the router returns `NOT_FOUND` for all of them.
+5. **`CONFIG.PAYMENT_METHOD` values are an assumption** and need confirming with
+   the school.
+6. **No `Role_Permissions` mapping sheet exists yet.** `Roles` and `Permissions`
+   share no key, so role→permission resolution cannot work. The original design
+   notes listed `ROLE_PERMISSIONS`; it must be reinstated before Phase 3.

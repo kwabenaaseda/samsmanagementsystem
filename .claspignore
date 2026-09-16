@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# .claspignore -- controls exactly what `clasp push` uploads to Apps Script.
+#
+# MECHANISM (verified against the installed clasp 3.4.1, which evaluates these
+# patterns with micromatch.not(files, patterns, {dot:true})):
+#
+#   **/**        -> ignore EVERYTHING (all files, all subdirectories, dotfiles)
+#   !<pattern>   -> re-include only that pattern
+#
+# A single `*` does NOT cross a path separator, so `!*.js` matches ONLY
+# root-level .js files. That is the guarantee: the Apps Script backend lives in
+# the repository root, and therefore NOTHING inside any subdirectory
+# (frontend/, tests/, docs/, node_modules/) can ever be pushed.
+#
+# To verify: run `clasp status` (lists what would be pushed) or
+# `node tests/claspignore.test.js`.
+# ---------------------------------------------------------------------------
+
+# Start by ignoring everything
+**/**
+
+# --- Re-include only the Apps Script backend (repository root) ---
+!appsscript.json
+!*.js
+!*.gs
+
+# --- Defensive exclusions, explicit for auditability ---
+# Local dependency trees (clasp's own default only covers the root one)
+node_modules/**
+**/node_modules/**
+
+# The future React + TypeScript + Vite frontend
+frontend/**
+**/frontend/**
+
+# Non-backend directories
+tests/**
+docs/**
+.git/**
+
+# Files that document or configure the repo, never Apps Script
+*.md
+.clasp.json
+.claspignore
+.gitignore
+package.json
+package-lock.json
