@@ -20,7 +20,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const BACKEND_FILES = ['Config.js', 'Response.js', 'Utils.js', 'Router.js'];
+const BACKEND_FILES = ['Config.js', 'Response.js', 'Utils.js', 'Permissions.js', 'Auth.js', 'Router.js'];
 
 /* ==========================================================================
  * Tiny assertion helpers (no framework)
@@ -208,6 +208,18 @@ function makeSandbox(spreadsheet, opts) {
       getScriptTimeZone: function () {
         return 'Africa/Abidjan';
       },
+      // Set by tests: null/absent = blank identity; { email } = signed in.
+      __activeEmail: undefined,
+      getActiveUser: function () {
+        var address = this.__activeEmail;
+        return {
+          getEmail: function () {
+            if (address === undefined || address === null) return '';
+            if (typeof address === 'function') return address();
+            return address;
+          }
+        };
+      },
     },
     Utilities: {
       getUuid: function () {
@@ -251,7 +263,50 @@ function loadBackend(sandbox) {
 
   // Top-level `const` bindings are lexical, not global-object properties, so
   // expose the ones the tests assert on.
-  const exporter = '\n;globalThis.__api = { CONFIG: CONFIG, ERROR_CODES: ERROR_CODES };';
+  const exporter = '\n;globalThis.__api = { CONFIG: CONFIG, ERROR_CODES: ERROR_CODES,' +
+    ' getAuthenticatedEmail_: (typeof getAuthenticatedEmail_ !== "undefined" ? getAuthenticatedEmail_ : undefined),' +
+    ' normalizeRoleKey_: (typeof normalizeRoleKey_ !== "undefined" ? normalizeRoleKey_ : undefined),' +
+    ' findActiveUserByEmail_: (typeof findActiveUserByEmail_ !== "undefined" ? findActiveUserByEmail_ : undefined),' +
+    ' getCurrentUser_: (typeof getCurrentUser_ !== "undefined" ? getCurrentUser_ : undefined),' +
+    ' requireAuthentication_: (typeof requireAuthentication_ !== "undefined" ? requireAuthentication_ : undefined),' +
+    ' assertValidPermissionFormat_: (typeof assertValidPermissionFormat_ !== "undefined" ? assertValidPermissionFormat_ : undefined),' +
+    ' resolveRolePermissions_: (typeof resolveRolePermissions_ !== "undefined" ? resolveRolePermissions_ : undefined),' +
+    ' hasPermission_: (typeof hasPermission_ !== "undefined" ? hasPermission_ : undefined),' +
+    ' requirePermission_: (typeof requirePermission_ !== "undefined" ? requirePermission_ : undefined),' +
+    ' getSheet_: (typeof getSheet_ !== "undefined" ? getSheet_ : undefined),' +
+    ' getSheetOrNull_: (typeof getSheetOrNull_ !== "undefined" ? getSheetOrNull_ : undefined),' +
+    ' getHeaders_: (typeof getHeaders_ !== "undefined" ? getHeaders_ : undefined),' +
+    ' rowToObject_: (typeof rowToObject_ !== "undefined" ? rowToObject_ : undefined),' +
+    ' isBlankRow_: (typeof isBlankRow_ !== "undefined" ? isBlankRow_ : undefined),' +
+    ' readAll_: (typeof readAll_ !== "undefined" ? readAll_ : undefined),' +
+    ' appendRow_: (typeof appendRow_ !== "undefined" ? appendRow_ : undefined),' +
+    ' setCellValue_: (typeof setCellValue_ !== "undefined" ? setCellValue_ : undefined),' +
+    ' findRowById_: (typeof findRowById_ !== "undefined" ? findRowById_ : undefined),' +
+    ' generateId_: (typeof generateId_ !== "undefined" ? generateId_ : undefined),' +
+    ' formatDate_: (typeof formatDate_ !== "undefined" ? formatDate_ : undefined),' +
+    ' formatDateTime_: (typeof formatDateTime_ !== "undefined" ? formatDateTime_ : undefined),' +
+    ' now_: (typeof now_ !== "undefined" ? now_ : undefined),' +
+    ' nowIso_: (typeof nowIso_ !== "undefined" ? nowIso_ : undefined),' +
+    ' toDate_: (typeof toDate_ !== "undefined" ? toDate_ : undefined),' +
+    ' isBlank_: (typeof isBlank_ !== "undefined" ? isBlank_ : undefined),' +
+    ' toTrimmedString_: (typeof toTrimmedString_ !== "undefined" ? toTrimmedString_ : undefined),' +
+    ' isNonEmptyString_: (typeof isNonEmptyString_ !== "undefined" ? isNonEmptyString_ : undefined),' +
+    ' isValidEmail_: (typeof isValidEmail_ !== "undefined" ? isValidEmail_ : undefined),' +
+    ' assertRequired_: (typeof assertRequired_ !== "undefined" ? assertRequired_ : undefined),' +
+    ' assertOneOf_: (typeof assertOneOf_ !== "undefined" ? assertOneOf_ : undefined),' +
+    ' assertEmail_: (typeof assertEmail_ !== "undefined" ? assertEmail_ : undefined),' +
+    ' appError_: (typeof appError_ !== "undefined" ? appError_ : undefined),' +
+    ' throwError_: (typeof throwError_ !== "undefined" ? throwError_ : undefined),' +
+    ' success: (typeof success !== "undefined" ? success : undefined),' +
+    ' failure: (typeof failure !== "undefined" ? failure : undefined),' +
+    ' jsonResponse: (typeof jsonResponse !== "undefined" ? jsonResponse : undefined),' +
+    ' getSpreadsheet_: (typeof getSpreadsheet_ !== "undefined" ? getSpreadsheet_ : undefined),' +
+    ' listSheetNames_: (typeof listSheetNames_ !== "undefined" ? listSheetNames_ : undefined),' +
+    ' sheetExists_: (typeof sheetExists_ !== "undefined" ? sheetExists_ : undefined),' +
+    ' parseRequest_: (typeof parseRequest_ !== "undefined" ? parseRequest_ : undefined),' +
+    ' listAvailableActions_: (typeof listAvailableActions_ !== "undefined" ? listAvailableActions_ : undefined),' +
+    ' doGet: (typeof doGet !== "undefined" ? doGet : undefined),' +
+    ' doPost: (typeof doPost !== "undefined" ? doPost : undefined) };';
 
   vm.runInContext(source + exporter, context, { filename: 'backend-bundle.js' });
   return sandbox;
@@ -279,7 +334,7 @@ const EXPECTED_TABS = [
   'Audit_Log',
 ];
 
-/** A spreadsheet containing every expected tab, plus a couple of data rows. */
+/** A spreadsheet containing every expected tab, plus data rows for tests. */
 function makeFullSpreadsheet() {
   const sheets = EXPECTED_TABS.map(function (tabName) {
     return makeSheet(tabName, [['Header_A', 'Header_B']]);
@@ -293,7 +348,31 @@ function makeFullSpreadsheet() {
     ['', '', '', ''],
     ['STU-3', 'Yaa', 'Boateng', 'Withdrawn'],
   ];
+  // Give the Users tab a real allowlist for the auth tests.
+  const users = sheets[2];
+  users._rows = [
+    ['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', ''],
+    ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', ''],
+  ];
   return makeSpreadsheet('SchoolManagementSystem', sheets);
+}
+
+/** A Users tab with one row per scenario the auth spec exercises. */
+function makeAuthSpreadsheet(rows) {
+  const users = makeSheet('Users', [
+    ['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'].concat(rows || []),
+  ]);
+  if (rows) users._rows = [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login']].concat(rows);
+  return makeSpreadsheet('SchoolManagementSystem', [users]);
+}
+
+/** Load the backend with a signed-in Google identity. */
+function loadBackendAs(email, spreadsheet, opts) {
+  const source = spreadsheet || makeFullSpreadsheet();
+  const sandbox = makeSandbox(source, opts);
+  sandbox.Session.__activeEmail = email;
+  return loadBackend(sandbox);
 }
 
 /* ==========================================================================
@@ -392,9 +471,11 @@ check('VALUES are derived from, not duplicated alongside, the enums', function (
   }));
 });
 
-check('only the health action is routed in Phase 1', function () {
-  eq(api.listAvailableActions_(), ['health']);
+check('health and the two auth actions are routed', function () {
+  eq(api.listAvailableActions_().sort(), ['auth.check', 'auth.me', 'health']);
   eq(CONFIG.ACTIONS.HEALTH, 'health');
+  eq(CONFIG.ACTIONS.AUTH.ME, 'auth.me');
+  eq(CONFIG.ACTIONS.AUTH.CHECK, 'auth.check');
 });
 
 check('all reserved action names follow the module.verb convention', function () {
@@ -893,11 +974,11 @@ check('parseRequest_ requires payload to be an object', function () {
   eq(err.details.receivedType, 'array');
 });
 
-check('a missing action is rejected with the list of available actions', function () {
+check('a missing action is rejected with all three routed actions', function () {
   const envelope = readEnvelope(api.doGet({ parameter: {} }));
   eq(envelope.success, false);
   eq(envelope.error, 'VALIDATION_ERROR');
-  eq(envelope.details.availableActions, ['health']);
+  eq(envelope.details.availableActions.sort(), ['auth.check', 'auth.me', 'health']);
 });
 
 check('an unknown action is NOT_FOUND and names what is available', function () {
@@ -905,7 +986,7 @@ check('an unknown action is NOT_FOUND and names what is available', function () 
   eq(envelope.success, false);
   eq(envelope.error, 'NOT_FOUND');
   eq(envelope.details.action, 'does.notExist');
-  eq(envelope.details.availableActions, ['health']);
+  eq(envelope.details.availableActions.sort(), ['auth.check', 'auth.me', 'health']);
 });
 
 check('the router never throws: any input still yields a valid envelope', function () {
@@ -923,6 +1004,240 @@ check('the router never throws: any input still yields a valid envelope', functi
     ok(envelope.error !== undefined, 'failures must carry an error code');
   });
 });
+
+section('Phase 2: auth.me and auth.check routes');
+
+check('P2: auth.me returns caller context over GET', function () {
+  var apiM = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var envM = JSON.parse(apiM.doGet({ parameter: { action: 'auth.me' } }).getContent());
+  eq(envM.success, true);
+  eq(envM.data, { userId: 'USR-1', staffId: 'STF-1', email: 'admin@school.edu', role: 'Admin' });
+});
+
+check('P2: auth.me without identity is UNAUTHORIZED', function () {
+  var apiN = loadBackendAs('', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var envN = JSON.parse(apiN.doGet({ parameter: { action: 'auth.me' } }).getContent());
+  eq(envN.success, false);
+  eq(envN.error, ERROR_CODES.UNAUTHORIZED);
+});
+
+check('P2: auth.check without permission proves authentication', function () {
+  var apiC = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var envC = JSON.parse(apiC.doPost({ parameter: {},
+    postData: { contents: JSON.stringify({ action: 'auth.check', payload: {} }) } }).getContent());
+  eq(envC.success, true);
+  eq(envC.data.authenticated, true);
+  eq(envC.data.permission, null);
+  eq(envC.data.allowed, true);
+});
+
+check('P2: auth.check reports allowed and denied honestly', function () {
+  var apiAd = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var granted = JSON.parse(apiAd.doPost({ parameter: {},
+    postData: { contents: JSON.stringify({ action: 'auth.check', payload: { permission: 'STUDENTS.READ' } }) } }).getContent());
+  eq(granted.success, true);
+  eq(granted.data.allowed, true);
+  eq(granted.data.permission, 'STUDENTS.READ');
+  var apiTe = loadBackendAs('teacher@school.edu', makeAuthSpreadsheet([
+    ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', '']
+  ]));
+  var denied = JSON.parse(apiTe.doPost({ parameter: {},
+    postData: { contents: JSON.stringify({ action: 'auth.check', payload: { permission: 'STUDENTS.READ' } }) } }).getContent());
+  eq(denied.success, true);
+  eq(denied.data.allowed, false);
+});
+
+check('P2: auth.check rejects malformed permission VALIDATION_ERROR', function () {
+  var apiB = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var envB = JSON.parse(apiB.doPost({ parameter: {},
+    postData: { contents: JSON.stringify({ action: 'auth.check', payload: { permission: 'nope' } }) } }).getContent());
+  eq(envB.success, false);
+  eq(envB.error, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('P2: auth endpoints ignore identity smuggled in payload', function () {
+  var apiS = loadBackendAs('teacher@school.edu', makeAuthSpreadsheet([
+    ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', ''],
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var envS = JSON.parse(apiS.doPost({ parameter: {},
+    postData: { contents: JSON.stringify({ action: 'auth.me', payload: { email: 'admin@school.edu' } }) } }).getContent());
+  eq(envS.success, true);
+  eq(envS.data.email, 'teacher@school.edu');
+});
+
+check('P2: health stays public auth routes need identity', function () {
+  var apiAnon = loadBackendAs('', makeFullSpreadsheet());
+  eq(JSON.parse(apiAnon.doGet({ parameter: { action: 'health' } }).getContent()).success, true);
+  eq(JSON.parse(apiAnon.doGet({ parameter: { action: 'auth.me' } }).getContent()).error, ERROR_CODES.UNAUTHORIZED);
+});
+
+check('P2: setCellValue_ writes one cell under lock', function () {
+  var wb = makeSpreadsheet('W', [makeSheet('Users',
+    [['User_ID', 'Last_Login'], ['USR-1', '']])]);
+  var apiW = loadBackend(wb.__sandbox || makeSandbox(wb));
+  ok(apiW.setCellValue_('Users', 2, 'Last_Login', 'x'), 'should return true');
+  eq(wb.getSheetByName('Users')._rows[1][1], 'x');
+  throwsWithCode(function () { apiW.setCellValue_('Users', 2, 'Nope', 'x'); }, ERROR_CODES.NOT_FOUND);
+  throwsWithCode(function () { apiW.setCellValue_('Users', 1, 'Last_Login', 'x'); }, ERROR_CODES.VALIDATION_ERROR);
+});
+
+
+section('Phase 2: Last_Login and permissions');
+
+check('P2: Last_Login stamped once per day never breaks login', function () {
+  var sh = makeSheet('Users', []);
+  sh._rows = [
+    ['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ];
+  var day1 = loadBackendAs('admin@school.edu', makeSpreadsheet('S', [sh]));
+  day1.requireAuthentication_();
+  var stamped = sh._rows[1][5];
+  ok(String(stamped) !== '', 'Last_Login should be stamped');
+  var day2 = loadBackendAs('admin@school.edu', makeSpreadsheet('S', [sh]));
+  day2.requireAuthentication_();
+  eq(sh._rows[1][5], stamped, 'same-day login must not rewrite');
+});
+
+check('P2: permission format validated unknown denies', function () {
+  var apiP = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var admin = apiP.requireAuthentication_();
+  eq(apiP.hasPermission_(admin, 'STUDENTS.READ'), true);
+  eq(apiP.hasPermission_(admin, 'NOPE.READ'), true);
+  eq(apiP.hasPermission_(admin, 'not-a-permission'), false);
+  eq(apiP.hasPermission_(admin, ''), false);
+  eq(apiP.hasPermission_(null, 'STUDENTS.READ'), false);
+  throwsWithCode(function () { apiP.assertValidPermissionFormat_('nope'); }, ERROR_CODES.VALIDATION_ERROR);
+  apiP.assertValidPermissionFormat_('STUDENTS.READ');
+});
+
+check('P2: non-admin holds no permissions temporary map', function () {
+  var apiT = loadBackendAs('teacher@school.edu', makeAuthSpreadsheet([
+    ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', '']
+  ]));
+  var teacher = apiT.requireAuthentication_();
+  eq(apiT.hasPermission_(teacher, 'STUDENTS.READ'), false);
+  eq(apiT.resolveRolePermissions_('Teacher'), []);
+  eq(apiT.resolveRolePermissions_('NoSuchRole'), []);
+  var ferr = throwsWithCode(function () { apiT.requirePermission_('STUDENTS.READ'); }, ERROR_CODES.FORBIDDEN);
+  eq(ferr.details.permission, 'STUDENTS.READ');
+});
+
+check('P2: requirePermission_ returns user when granted', function () {
+  var apiG = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  eq(apiG.requirePermission_('STUDENTS.READ').userId, 'USR-1');
+});
+
+
+section('Phase 2: duplicate and error handling');
+
+check('P2: duplicate email safe when only one row active', function () {
+  var api6 = loadBackendAs('dup@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'dup@school.edu', 'Admin', 'Inactive', ''],
+    ['USR-2', 'STF-2', 'dup@school.edu', 'Admin', 'Active', '']
+  ]));
+  eq(api6.requireAuthentication_().userId, 'USR-2');
+});
+
+check('P2: missing Users sheet is structured SERVER_ERROR', function () {
+  var api7 = loadBackendAs('admin@school.edu', makeSpreadsheet('Empty', []));
+  var res7 = api7.getCurrentUser_();
+  eq(res7.user, null);
+  eq(res7.error.code, ERROR_CODES.SERVER_ERROR);
+});
+
+check('P2: missing Users columns reported not misread', function () {
+  var bad = makeSpreadsheet('Bad', [makeSheet('Users', [['User_ID', 'Email']])]);
+  var api8 = loadBackendAs('admin@school.edu', bad);
+  var res8 = api8.getCurrentUser_();
+  eq(res8.user, null);
+  eq(res8.error.code, ERROR_CODES.SERVER_ERROR);
+  ok(res8.error.details.missingColumns.indexOf('Role') !== -1, 'should name missing Role');
+});
+
+check('P2: context carries no secrets', function () {
+  var api9 = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  eq(Object.keys(api9.requireAuthentication_()).sort(), ['email', 'role', 'staffId', 'userId']);
+});
+
+check('P2: throwing Session fails closed UNAUTHORIZED', function () {
+  var sb = makeSandbox(makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  sb.Session.getActiveUser = function () { throw new Error('no identity'); };
+  eq(loadBackend(sb).getCurrentUser_().error.code, ERROR_CODES.UNAUTHORIZED);
+});
+
+
+section('Phase 2: authentication (Auth.js)');
+
+check('P2: blank Google identity yields UNAUTHORIZED with reason', function () {
+  var anonApi = loadBackendAs('', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  eq(anonApi.getAuthenticatedEmail_(), '');
+  var result = anonApi.getCurrentUser_();
+  eq(result.user, null);
+  eq(result.error.code, ERROR_CODES.UNAUTHORIZED);
+  eq(result.error.details.reason, 'no-google-identity');
+});
+
+check('P2: unknown email yields UNAUTHORIZED not NOT_FOUND', function () {
+  var api2 = loadBackendAs('stranger@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var res2 = api2.getCurrentUser_();
+  eq(res2.user, null);
+  eq(res2.error.code, ERROR_CODES.UNAUTHORIZED);
+  eq(res2.error.details.reason, 'no-matching-user');
+});
+
+check('P2: inactive user cannot authenticate', function () {
+  var api3 = loadBackendAs('old@school.edu', makeAuthSpreadsheet([
+    ['USR-9', 'STF-9', 'old@school.edu', 'Admin', 'Inactive', '']
+  ]));
+  var res3 = api3.getCurrentUser_();
+  eq(res3.user, null);
+  eq(res3.error.code, ERROR_CODES.UNAUTHORIZED);
+});
+
+check('P2: email match ignores case and spaces', function () {
+  var api4 = loadBackendAs('  ADMIN@School.Edu ', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  var res4 = api4.getCurrentUser_();
+  eq(res4.error, null);
+  eq(res4.user.email, 'admin@school.edu');
+  eq(res4.user.userId, 'USR-1');
+  eq(res4.user.role, 'Admin');
+});
+
+check('P2: duplicate active emails fail closed with CONFLICT', function () {
+  var api5 = loadBackendAs('dup@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'dup@school.edu', 'Admin', 'Active', ''],
+    ['USR-2', 'STF-2', 'dup@school.edu', 'Admin', 'Active', '']
+  ]));
+  var err5 = throwsWithCode(function () { api5.requireAuthentication_(); }, ERROR_CODES.CONFLICT);
+  eq(err5.details.email, 'dup@school.edu');
+});
+
 
 section('Phase boundary (no fake implementations)');
 
@@ -949,9 +1264,14 @@ check('every reserved action is genuinely NOT implemented', function () {
 
 check('no phase-2+ module has been implemented yet', function () {
   ['Students.js', 'Staff.js', 'SchoolFees.js', 'FeedingFees.js', 'Stationery.js', 'Inventory.js',
-   'Salaries.js', 'Delegations.js', 'Dashboard.js', 'Auth.js', 'Permissions.js', 'Audit.js'].forEach(function (file) {
+   'Salaries.js', 'Delegations.js', 'Dashboard.js', 'Audit.js'].forEach(function (file) {
     const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
     ok(/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' is no longer an untouched placeholder');
+  });
+  // Auth.js and Permissions.js are the Phase 2 scope and must be implemented.
+  ['Auth.js', 'Permissions.js'].forEach(function (file) {
+    const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
+    ok(!/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' should be implemented in Phase 2');
   });
 });
 

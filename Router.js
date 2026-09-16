@@ -14,9 +14,9 @@
  *   doGet/doPost -> handleRequest_ -> parseRequest_ -> route table -> action
  *                -> standard response envelope (Response.js)
  *
- * IMPLEMENTATION STATUS (Phase 1): only CONFIG.ACTIONS.HEALTH is routed.
- * Every other action name in CONFIG.ACTIONS is a reserved identifier for a
- * later phase and currently returns NOT_FOUND.
+ * IMPLEMENTATION STATUS (Phase 2): health, auth.me and auth.check are
+ * routed. Every other action name in CONFIG.ACTIONS is a reserved
+ * identifier for a later phase and currently returns NOT_FOUND.
  */
 
 /**
@@ -46,12 +46,16 @@ function doPost(e) {
  *
  * Built on demand rather than as a top-level constant, so the router never
  * depends on the order in which Apps Script evaluates the project files.
+ * Built on demand rather than as a top-level constant, so the router never
+ * depends on the order in which Apps Script evaluates the project files.
  *
  * @return {Object<string, Function>} Map of action name to handler.
  */
 function getRoutes_() {
   const routes = {};
   routes[CONFIG.ACTIONS.HEALTH] = handleHealth_;
+  routes[CONFIG.ACTIONS.AUTH.ME] = handleAuthMe_;
+  routes[CONFIG.ACTIONS.AUTH.CHECK] = handleAuthCheck_;
   return routes;
 }
 

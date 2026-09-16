@@ -313,6 +313,50 @@ function appendRow_(name, row) {
 }
 
 /**
+ * Update a single cell by header name.
+ *
+ * Phase 2 addition: the ONLY new Utils.js helper. Auth.js needs it for the
+ * Last_Login bookkeeping write; no other Phase 1 helper writes a single
+ * cell. Runs inside withScriptLock_ like every other mutating helper.
+ *
+ * @param {string} name Sheet (tab) name.
+ * @param {number} sheetRow 1-based row number.
+ * @param {string} column Header of the column to write.
+ * @param {*} value The value to store.
+ */
+function setCellValue_(name, sheetRow, column, value) {
+  var sheet = getSheet_(name);
+  var headers = getHeaders_(sheet);
+  if (headers.length === 0) {
+    throwError_(
+      'Sheet "' + name + '" has no header row.',
+      ERROR_CODES.SERVER_ERROR,
+      { sheet: name }
+    );
+  }
+  var columnName = toTrimmedString_(column);
+  var columnIndex = headers.indexOf(columnName);
+  if (columnIndex === -1) {
+    throwError_(
+      'Column "' + columnName + '" was not found in sheet "' + name + '".',
+      ERROR_CODES.NOT_FOUND,
+      { sheet: name, column: columnName, validColumns: headers }
+    );
+  }
+  if (typeof sheetRow !== 'number' || sheetRow < 2 || Math.floor(sheetRow) !== sheetRow) {
+    throwError_(
+      'setCellValue_ requires a 1-based data row number (2 or greater).',
+      ERROR_CODES.VALIDATION_ERROR,
+      { sheet: name, received: sheetRow }
+    );
+  }
+  return withScriptLock_(function () {
+    sheet.getRange(sheetRow, columnIndex + 1, 1, 1).setValues([[value]]);
+    return true;
+  });
+}
+
+/**
  * Find the first row whose id column equals `id`.
  *
  * @param {string} name Sheet (tab) name.

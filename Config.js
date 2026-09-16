@@ -81,6 +81,15 @@ const CONFIG = {
     VOIDED: 'Voided'
   },
 
+  /**
+   * Users-sheet account status. Only ACTIVE rows may authenticate; every
+   * other value (e.g. 'Inactive') is rejected at login (UNAUTHORIZED).
+   */
+  USER_STATUS: {
+    ACTIVE: 'Active',
+    INACTIVE: 'Inactive'
+  },
+
   /** Academic terms used by School_Fees and Feeding_Fees. */
   TERM: {
     TERM_1: 'Term 1',
@@ -111,12 +120,23 @@ const CONFIG = {
    * API action names -- the frontend/backend contract.
    * Transcribed from the agreed endpoint list in the project brief.
    *
-   * IMPLEMENTATION STATUS: Phase 1 routes ONLY `HEALTH`.
+   * IMPLEMENTATION STATUS: `HEALTH` plus the two AUTH actions are routed.
    * Every other action name below is a RESERVED identifier for a later phase
    * and is NOT implemented -- the router will return NOT_FOUND for it.
+   *
+   * PERMISSION FORMAT: MODULE.ACTION in UPPER_SNAKE form, e.g.
+   * 'STUDENTS.READ'. Module tokens match the frontend/brief contract
+   * (STUDENTS, STAFF, USERS, ROLES, PERMISSIONS, SCHOOL_FEES, FEEDING_FEES,
+   * STATIONERY, INVENTORY, SALARIES, DELEGATIONS, AUDIT, DASHBOARD, SYSTEM).
+   * Action verbs are READ / CREATE / UPDATE / WITHDRAW / REVOKE / MANAGE.
    */
   ACTIONS: {
     HEALTH: 'health',
+
+    AUTH: {
+      ME: 'auth.me',
+      CHECK: 'auth.check'
+    },
 
     STUDENTS: {
       LIST: 'students.list',
