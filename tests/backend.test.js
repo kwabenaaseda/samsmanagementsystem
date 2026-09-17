@@ -20,7 +20,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const BACKEND_FILES = ['Config.js', 'Response.js', 'Utils.js', 'Permissions.js', 'Auth.js', 'Router.js', 'Students.js', 'Staff.js'];
+const BACKEND_FILES = ['Config.js', 'Response.js', 'Utils.js', 'Permissions.js', 'Auth.js', 'Router.js', 'Students.js', 'Staff.js', 'SchoolFees.js', 'FeedingFees.js'];
 
 /* ==========================================================================
  * Tiny assertion helpers (no framework)
@@ -190,7 +190,11 @@ function simpleFormat(date, pattern) {
  */
 function makeSandbox(spreadsheet, opts) {
   const options = opts || {};
-  return {
+  // Lock depth is observable so the tests can prove that a decision or a row
+  // write happened inside the critical section (locked read-modify-write checks).
+  const sandbox = {
+    __lockDepth: 0,
+    __lockAttempts: 0,
     console: console,
     SpreadsheetApp: {
       openById: function (id) {
@@ -203,9 +207,14 @@ function makeSandbox(spreadsheet, opts) {
       getScriptLock: function () {
         return {
           tryLock: function () {
-            return !options.lockUnavailable;
+            const acquired = !options.lockUnavailable;
+            sandbox.__lockAttempts += 1;
+            if (acquired) sandbox.__lockDepth += 1;
+            return acquired;
           },
-          releaseLock: function () {},
+          releaseLock: function () {
+            if (sandbox.__lockDepth > 0) sandbox.__lockDepth -= 1;
+          },
         };
       },
     },
@@ -254,6 +263,7 @@ function makeSandbox(spreadsheet, opts) {
       },
     },
   };
+  return sandbox;
 }
 
 /**
@@ -325,7 +335,23 @@ function loadBackend(sandbox) {
     ' hasPermission_: (typeof hasPermission_ !== "undefined" ? hasPermission_ : undefined),' +
     ' toPermissionCode_: (typeof toPermissionCode_ !== "undefined" ? toPermissionCode_ : undefined),' +
     ' getPermissionsIndex_: (typeof getPermissionsIndex_ !== "undefined" ? getPermissionsIndex_ : undefined),' +
-    ' setupRolePermissions: (typeof setupRolePermissions !== "undefined" ? setupRolePermissions : undefined)' +
+    ' setupRolePermissions: (typeof setupRolePermissions !== "undefined" ? setupRolePermissions : undefined),' +
+    ' getSchoolFeesSheet_: (typeof getSchoolFeesSheet_ !== "undefined" ? getSchoolFeesSheet_ : undefined),' +
+    ' getSchoolFeesHeaders_: (typeof getSchoolFeesHeaders_ !== "undefined" ? getSchoolFeesHeaders_ : undefined),' +
+    ' findSchoolFeeById_: (typeof findSchoolFeeById_ !== "undefined" ? findSchoolFeeById_ : undefined),' +
+    ' handleSchoolFeesList_: (typeof handleSchoolFeesList_ !== "undefined" ? handleSchoolFeesList_ : undefined),' +
+    ' handleSchoolFeesGet_: (typeof handleSchoolFeesGet_ !== "undefined" ? handleSchoolFeesGet_ : undefined),' +
+    ' handleSchoolFeesCreate_: (typeof handleSchoolFeesCreate_ !== "undefined" ? handleSchoolFeesCreate_ : undefined),' +
+    ' handleSchoolFeesUpdate_: (typeof handleSchoolFeesUpdate_ !== "undefined" ? handleSchoolFeesUpdate_ : undefined),' +
+    ' handleSchoolFeesVoid_: (typeof handleSchoolFeesVoid_ !== "undefined" ? handleSchoolFeesVoid_ : undefined),' +
+    ' getFeedingFeesSheet_: (typeof getFeedingFeesSheet_ !== "undefined" ? getFeedingFeesSheet_ : undefined),' +
+    ' getFeedingFeesHeaders_: (typeof getFeedingFeesHeaders_ !== "undefined" ? getFeedingFeesHeaders_ : undefined),' +
+    ' findFeedingFeeById_: (typeof findFeedingFeeById_ !== "undefined" ? findFeedingFeeById_ : undefined),' +
+    ' handleFeedingFeesList_: (typeof handleFeedingFeesList_ !== "undefined" ? handleFeedingFeesList_ : undefined),' +
+    ' handleFeedingFeesGet_: (typeof handleFeedingFeesGet_ !== "undefined" ? handleFeedingFeesGet_ : undefined),' +
+    ' handleFeedingFeesCreate_: (typeof handleFeedingFeesCreate_ !== "undefined" ? handleFeedingFeesCreate_ : undefined),' +
+    ' handleFeedingFeesUpdate_: (typeof handleFeedingFeesUpdate_ !== "undefined" ? handleFeedingFeesUpdate_ : undefined),' +
+    ' handleFeedingFeesVoid_: (typeof handleFeedingFeesVoid_ !== "undefined" ? handleFeedingFeesVoid_ : undefined)' +
     ' };';
 
   vm.runInContext(source + exporter, context, { filename: 'backend-bundle.js' });
@@ -454,6 +480,50 @@ function makeFullSpreadsheet() {
   sheets[EXPECTED_TABS.indexOf('Roles')] = p4a.roles;
   sheets[EXPECTED_TABS.indexOf('Permissions')] = p4a.permissions;
   sheets[EXPECTED_TABS.indexOf('Role_Permissions')] = p4a.rolePermissions;
+
+  // Give the Staff tab real content for the read tests.
+  const staff = sheets[1];
+  staff._rows = [
+    ['Staff_ID', 'First_Name', 'Last_Name', 'Role', 'Phone', 'Email',
+      'Emergency_Contact', 'Employment_Status', 'Hire_Date', 'Salary_Amount',
+      'Salary_Frequency', 'Bank_Account', 'Remarks'],
+    ['STF-1', 'Paul', 'Mensah', 'Admin', '020-1234567', 'paul@school.edu',
+      'Mensah', 'Active', '2020-01-15', 8500, 'Monthly', '1234567890', 'Head teacher'],
+    ['STF-2', 'Akua', 'Owusu', 'Teacher', '020-2345678', 'akua@school.edu',
+      'Owusu', 'Active', '2021-03-01', 5200, 'Monthly', '0987654321', 'JHS 1 teacher'],
+  ];
+
+  // Phase 4B: pre-populate the School_Fees and Feeding_Fees sheets.
+  const schoolFeesIdx = EXPECTED_TABS.indexOf('School_Fees');
+  const schoolFees = sheets[schoolFeesIdx];
+  schoolFees._rows = [
+    ['Payment_ID', 'Student_ID', 'Academic_Year', 'Term', 'Amount_Due',
+      'Amount_Paid', 'Balance', 'Payment_Date', 'Payment_Method', 'Reference',
+      'Status', 'Recorded_By', 'Notes'],
+    ['SF-001', 'STU-1', '2025/2026', 'Term 1', 1200, 1200, 0,
+      '2025-09-15', 'Bank Transfer', 'SF-2025-T1-001', 'Paid', 'STF-1',
+      'Term 1 fees'],
+    ['SF-002', 'STU-1', '2025/2026', 'Term 2', 1200, 600, 600,
+      '2025-12-10', 'Mobile Money', 'SF-2025-T2-002', 'Partial', 'STF-1',
+      'Half paid'],
+    ['SF-003', 'STU-2', '2025/2026', 'Term 1', 1200, 0, 1200,
+      '2025-09-15', 'Cash', 'SF-2025-T1-003', 'Unpaid', 'STF-1',
+      'Not yet paid'],
+  ];
+  const feedingFeesIdx = EXPECTED_TABS.indexOf('Feeding_Fees');
+  const feedingFees = sheets[feedingFeesIdx];
+  feedingFees._rows = [
+    ['Payment_ID', 'Student_ID', 'Academic_Year', 'Term', 'Amount_Due',
+      'Amount_Paid', 'Balance', 'Payment_Date', 'Payment_Method', 'Reference',
+      'Status', 'Recorded_By', 'Notes'],
+    ['FF-001', 'STU-1', '2025/2026', 'Term 1', 450, 450, 0,
+      '2025-09-15', 'Cash', 'FF-2025-T1-001', 'Paid', 'STF-1',
+      'Feeding fees'],
+    ['FF-002', 'STU-2', '2025/2026', 'Term 1', 450, 225, 225,
+      '2025-09-15', 'Mobile Money', 'FF-2025-T1-002', 'Partial', 'STF-1',
+      'Half paid'],
+  ];
+
   return makeSpreadsheet('SchoolManagementSystem', sheets);
 }
 
@@ -573,9 +643,14 @@ check('VALUES are derived from, not duplicated alongside, the enums', function (
   }));
 });
 
-check('health, auth and Phase 3 actions are routed', function () {
+check('health, auth, Phase 3 and Phase 4B actions are routed', function () {
   eq(api.listAvailableActions_().sort(), [
-    'auth.check', 'auth.me', 'health',
+    'auth.check', 'auth.me',
+    'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
+    'feedingFees.void',
+    'health',
+    'schoolFees.create', 'schoolFees.get', 'schoolFees.list', 'schoolFees.update',
+    'schoolFees.void',
     'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
     'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
   ]);
@@ -830,12 +905,16 @@ check('readAll_ maps rows onto header-keyed objects and skips blank rows', funct
 });
 
 check('readAll_ returns [] for a header-only sheet', function () {
-  eq(api.readAll_('Staff'), []);
+  // makeFullSpreadsheet() now populates the Staff sheet with real rows, so we
+  // must construct a miniature spreadsheet that has a header-only Staff tab.
+  const mini = makeSpreadsheet('Mini', [makeSheet('Staff', [['Staff_ID', 'First_Name']])]);
+  const apiMini = loadBackend(makeSandbox(mini));
+  eq(apiMini.readAll_('Staff'), []);
 });
 
 check('readAll_ returns [] for a completely empty sheet', function () {
-  const blank = loadBackend(makeSandbox(makeSpreadsheet('Blank', [makeSheet('Students', [])])));
-  eq(blank.readAll_('Students'), []);
+  const blank = loadBackend(makeSandbox(makeSpreadsheet('Blank', [makeSheet('EmptySheet', [['A', 'B']])])));
+  eq(blank.readAll_('EmptySheet'), []);
 });
 
 check('readAll_ throws NOT_FOUND for an unknown sheet', function () {
@@ -1085,7 +1164,12 @@ check('a missing action is rejected with all routed actions', function () {
   eq(envelope.success, false);
   eq(envelope.error, 'VALIDATION_ERROR');
   eq(envelope.details.availableActions.sort(), [
-    'auth.check', 'auth.me', 'health',
+    'auth.check', 'auth.me',
+    'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
+    'feedingFees.void',
+    'health',
+    'schoolFees.create', 'schoolFees.get', 'schoolFees.list', 'schoolFees.update',
+    'schoolFees.void',
     'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
     'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
   ]);
@@ -1097,7 +1181,12 @@ check('an unknown action is NOT_FOUND and names what is available', function () 
   eq(envelope.error, 'NOT_FOUND');
   eq(envelope.details.action, 'does.notExist');
   eq(envelope.details.availableActions.sort(), [
-    'auth.check', 'auth.me', 'health',
+    'auth.check', 'auth.me',
+    'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
+    'feedingFees.void',
+    'health',
+    'schoolFees.create', 'schoolFees.get', 'schoolFees.list', 'schoolFees.update',
+    'schoolFees.void',
     'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
     'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
   ]);
@@ -2201,16 +2290,1794 @@ check('P4A: auth.check resolves allowed and denied through the mapping', functio
   eq(denied.data.allowed, false);
 });
 
+
+/* ==========================================================================
+ * Phase 4B: School Fees + Feeding Fees
+ * ======================================================================== */
+
+/* --------------------------------------------------------------------------
+ * Phase 4B fixtures
+ * ------------------------------------------------------------------------ */
+
+/** Valid school fee create payload; `overrides` replaces or adds fields. */
+function sfCreatePayload(overrides) {
+  return Object.assign({
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20',
+  }, overrides || {});
+}
+
+/** Valid feeding fee create payload; `overrides` replaces or adds fields. */
+function ffCreatePayload(overrides) {
+  return Object.assign({
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 300,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20',
+  }, overrides || {});
+}
+
+/** Copy of a payload with `field` removed, to exercise required-field rules. */
+function payloadWithout(payload, field) {
+  const copy = Object.assign({}, payload);
+  delete copy[field];
+  return copy;
+}
+
+/**
+ * Full spreadsheet (real fee/student/staff/Users data) with optional Users,
+ * Roles and Role_Permissions row overrides, for the authorization tests.
+ */
+function p4bSpreadsheet(opts) {
+  opts = opts || {};
+  const ss = makeFullSpreadsheet();
+  if (opts.users) {
+    ss.getSheetByName('Users')._rows =
+      [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login']].concat(opts.users);
+  }
+  if (opts.roles) {
+    ss.getSheetByName('Roles')._rows =
+      [['Role_ID', 'Role_Name', 'Description', 'Status']].concat(opts.roles);
+  }
+  if (opts.mappings) {
+    ss.getSheetByName('Role_Permissions')._rows =
+      [['Role_Permission_ID', 'Role_ID', 'Permission_ID', 'Status']].concat(opts.mappings);
+  }
+  return ss;
+}
+
+/** Permission_ID the Permissions sheet stores for a catalog code (PERM-1..N). */
+function permIdFor(code) {
+  return 'PERM-' + (P4A_PERMISSION_CODES.indexOf(code) + 1);
+}
+
+/** The Payment_ID values in a fee sheet, in sheet order. */
+function feeIds(ss, tabName) {
+  return ss.getSheetByName(tabName)._rows.slice(1).map(function (row) {
+    return row[0];
+  });
+}
+
+/** The 1-based sheet row a fee record occupies (row 1 is the header row). */
+function feeRowOf(ss, tabName, paymentId) {
+  return feeIds(ss, tabName).indexOf(paymentId) + 2;
+}
+
+/** Column index of a fee header in the fixture's header row. */
+function feeColIndex(ss, tabName, header) {
+  return ss.getSheetByName(tabName)._rows[0].indexOf(header);
+}
+
+/**
+ * Wrap the sandbox's getSheet_ so that every read and every write against one
+ * tab is logged together with the script-lock depth in force at that moment.
+ * Lets a test prove a decision (or a row write) happened INSIDE the critical
+ * section rather than before it. Returns the log; entries look like
+ * {op, row, numRows, numCols, depth, values}.
+ */
+function observeSheetAccess(api, tabName) {
+  const log = [];
+  const realGetSheet = api.getSheet_;
+  api.getSheet_ = function (name) {
+    const sheet = realGetSheet(name);
+    if (name !== tabName) return sheet;
+    return {
+      getName: function () { return sheet.getName(); },
+      getLastRow: function () { return sheet.getLastRow(); },
+      getLastColumn: function () { return sheet.getLastColumn(); },
+      getRange: function (row, col, numRows, numCols) {
+        const range = sheet.getRange(row, col, numRows, numCols);
+        return {
+          getValues: function () {
+            const values = range.getValues();
+            log.push({
+              op: 'read', row: row, numRows: numRows, numCols: numCols,
+              depth: api.__lockDepth, values: values,
+            });
+            return values;
+          },
+          setValues: function (values) {
+            log.push({
+              op: 'write', row: row, numRows: numRows, numCols: numCols,
+              depth: api.__lockDepth, values: values,
+            });
+            return range.setValues(values);
+          },
+        };
+      },
+    };
+  };
+  return log;
+}
+
+/** Log entries that read the whole stored row `row` (not a single column). */
+function fullRowReads(log, row) {
+  return log.filter(function (entry) {
+    return entry.op === 'read' && entry.row === row && entry.numCols > 1;
+  });
+}
+
+/** Full spreadsheet with one tab removed entirely (structural failure test). */
+function p4bSpreadsheetWithoutTab(tabName) {
+  const ss = makeFullSpreadsheet();
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    if (sheets[i].getName() === tabName) {
+      sheets.splice(i, 1);
+      break;
+    }
+  }
+  return ss;
+}
+
+/** The eight fee permission codes, in catalog order. */
+const P4B_FEE_PERMISSIONS = [
+  'SCHOOL_FEES.READ', 'SCHOOL_FEES.CREATE', 'SCHOOL_FEES.UPDATE', 'SCHOOL_FEES.VOID',
+  'FEEDING_FEES.READ', 'FEEDING_FEES.CREATE', 'FEEDING_FEES.UPDATE', 'FEEDING_FEES.VOID',
+];
+
+section('Phase 4B: School Fees — routing and existence');
+
+check('schoolFees.list action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('schoolFees.list') !== -1, 'schoolFees.list must be routed');
+});
+
+check('schoolFees.get action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('schoolFees.get') !== -1, 'schoolFees.get must be routed');
+});
+
+check('schoolFees.create action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('schoolFees.create') !== -1, 'schoolFees.create must be routed');
+});
+
+check('schoolFees.update action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('schoolFees.update') !== -1, 'schoolFees.update must be routed');
+});
+
+check('schoolFees.void action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('schoolFees.void') !== -1, 'schoolFees.void must be routed');
+});
+
+section('Phase 4B: School Fees — create');
+
+check('schoolFees.create: admin can create a school fee payment with server-generated SF- ID', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1500,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20',
+    Reference: 'TEST-001',
+    Notes: 'Test payment'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  ok(env.success, 'create should succeed: ' + (env.message || env.error));
+  if (env.success) {
+    ok(env.data.Payment_ID && env.data.Payment_ID.indexOf('SF-') === 0,
+      'stored record must have a server-generated SF- ID, got: ' + env.data.Payment_ID);
+    eq(env.data.Student_ID, 'STU-2');
+    eq(env.data.Balance, 1500, 'Balance should be Amount_Due - Amount_Paid');
+    eq(env.data.Amount_Due, 1500);
+    eq(env.data.Amount_Paid, 0);
+    eq(env.data.Status, 'Unpaid');
+  }
+});
+
+check('schoolFees.create: Recorded_By comes from authenticated user, not client', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Bank Transfer',
+    Payment_Date: '2025-09-20',
+    Reference: 'TEST-002',
+    Recorded_By: 'EVIL-STF-999'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  ok(env.success, 'create should succeed: ' + (env.message || env.error));
+  if (env.success) {
+    eq(env.data.Recorded_By, 'STF-1',
+      'Recorded_By must be the authenticated user\'s staff ID, not client-supplied');
+  }
+});
+
+check('schoolFees.create: client-supplied Balance is ignored and recalculated', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 2000,
+    Amount_Paid: 500,
+    Payment_Method: 'Mobile Money',
+    Payment_Date: '2025-09-20',
+    Balance: 9999
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  ok(env.success, 'create should succeed: ' + (env.message || env.error));
+  if (env.success) {
+    eq(env.data.Balance, 1500, 'Balance must be recalculated as Amount_Due - Amount_Paid');
+  }
+});
+
+check('schoolFees.create: Amount_Paid > Amount_Due is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 500,
+    Amount_Paid: 1000,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+});
+
+check('schoolFees.create: negative Amount_Due is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: -100,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+});
+
+check('schoolFees.create: negative Amount_Paid is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: -50,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+});
+
+check('schoolFees.create: missing Student_ID is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+});
+
+check('schoolFees.create: nonexistent Student_ID is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-999',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'NOT_FOUND');
+});
+
+check('schoolFees.create: withdrawn student is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-3',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.message.toLowerCase().indexOf('withdrawn') !== -1 || (env.details && env.details.reason === 'student-withdrawn'),
+    'should reject withdrawn student');
+});
+
+check('schoolFees.create: missing Academic_Year is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+});
+
+check('schoolFees.create: missing Term is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+});
+
+check('schoolFees.create: invalid Payment_Method is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Bitcoin',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.details && Array.isArray(env.details.allowedValues), 'should list allowed payment methods');
+});
+
+check('schoolFees.create: invalid Payment_Date is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: 'not-a-date'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+});
+
+check('schoolFees.create: client-supplied Payment_ID is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload({ Payment_ID: 'SF-999' }));
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.message.indexOf('server-generated') !== -1, 'message should explain the rule');
+});
+
+check('schoolFees.create: rejects unknown fields', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload({ Middle_Name: 'X' }));
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.details.unknownColumns.indexOf('Middle_Name') !== -1, 'should list unknown columns');
+  ok(env.details.validColumns.indexOf('Payment_ID') !== -1, 'should list the valid columns');
+});
+
+check('schoolFees.create: non-numeric or negative amounts are rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  [
+    ['Amount_Due', 'abc'],
+    ['Amount_Paid', 'abc'],
+    ['Amount_Due', -1],
+    ['Amount_Paid', -1],
+    ['Amount_Paid', 5000],
+  ].forEach(function (pair) {
+    const env = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload({ [pair[0]]: pair[1] }));
+    eq(env.success, false, pair[0] + '=' + pair[1] + ' must be rejected');
+    eq(env.error, 'VALIDATION_ERROR');
+  });
+});
+
+check('schoolFees.create: every required field is enforced', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  ['Amount_Due', 'Amount_Paid', 'Payment_Method', 'Payment_Date'].forEach(function (field) {
+    const env = doPostEnvelope(apiA, 'schoolFees.create', payloadWithout(sfCreatePayload(), field));
+    eq(env.success, false, field + ' is required');
+    eq(env.error, 'VALIDATION_ERROR');
+    ok(env.details.missingFields.indexOf(field) !== -1, 'should flag missing ' + field);
+  });
+});
+
+check('schoolFees.create: generated IDs are sequential and never reused', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const first = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload());
+  const second = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload());
+  eq(first.data.Payment_ID, 'SF-004', 'the next ID must follow the highest stored ID');
+  eq(second.data.Payment_ID, 'SF-005');
+  eq(feeIds(ss, 'School_Fees'), ['SF-001', 'SF-002', 'SF-003', 'SF-004', 'SF-005'],
+    'each create appends exactly one row and never rewrites an existing ID');
+});
+
+check('schoolFees.create: refuses a duplicate server-generated Payment_ID', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const realFind = apiA.findSchoolFeeById_;
+  // Force the collision the sequential generator is designed to avoid.
+  apiA.findSchoolFeeById_ = function () {
+    return { sheetRow: 2, record: {} };
+  };
+  const env = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload());
+  apiA.findSchoolFeeById_ = realFind;
+  eq(env.success, false);
+  eq(env.error, 'CONFLICT');
+  ok(env.message.indexOf('Duplicate Payment_ID') !== -1, 'message should name the collision');
+});
+
+section('Phase 4B: School Fees — get and list');
+
+check('schoolFees.get returns an existing payment', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'schoolFees.get', Payment_ID: 'SF-001' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    eq(env.data.Payment_ID, 'SF-001');
+    eq(env.data.Student_ID, 'STU-1');
+    eq(env.data.Amount_Due, 1200);
+    eq(env.data.Balance, 0);
+    eq(env.data.Status, 'Paid');
+  }
+});
+
+check('schoolFees.get returns NOT_FOUND for a missing payment', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'schoolFees.get', Payment_ID: 'SF-999' }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'NOT_FOUND');
+});
+
+check('schoolFees.list returns all records', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'schoolFees.list' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    ok(Array.isArray(env.data));
+    ok(env.data.length >= 3, 'should have at least 3 pre-populated payments');
+  }
+});
+
+check('schoolFees.list filters by Student_ID', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'schoolFees.list', Student_ID: 'STU-1' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    ok(Array.isArray(env.data));
+    ok(env.data.length >= 2, 'STU-1 should have at least 2 payments');
+    env.data.forEach(function (p) { eq(p.Student_ID, 'STU-1'); });
+  }
+});
+
+check('schoolFees.list filters by Status', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'schoolFees.list', Status: 'Paid' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    ok(Array.isArray(env.data));
+    env.data.forEach(function (p) { eq(p.Status, 'Paid'); });
+  }
+});
+
+check('schoolFees.list filters by Academic_Year', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'schoolFees.list', Academic_Year: '2025/2026' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    ok(Array.isArray(env.data));
+    env.data.forEach(function (p) { eq(p.Academic_Year, '2025/2026'); });
+  }
+});
+
+check('schoolFees.list filters by Term', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'schoolFees.list', Term: 'Term 1' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    ok(Array.isArray(env.data));
+    env.data.forEach(function (p) { eq(p.Term, 'Term 1'); });
+  }
+});
+
+check('schoolFees.get requires a Payment_ID', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doGetEnvelope(apiA, { action: 'schoolFees.get' });
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  eq(env.details.field, 'Payment_ID');
+});
+
+check('schoolFees.list returns an empty array when nothing matches', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doGetEnvelope(apiA, { action: 'schoolFees.list', Student_ID: 'STU-999' });
+  eq(env.success, true);
+  eq(env.data, [], 'no matches is an empty list, not an error');
+});
+
+check('schoolFees.list combines filters', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doGetEnvelope(apiA, {
+    action: 'schoolFees.list', Student_ID: 'STU-1', Term: 'Term 1',
+  });
+  eq(env.success, true);
+  eq(env.data.length, 1, 'STU-1 has exactly one Term 1 payment in the fixture');
+  eq(env.data[0].Payment_ID, 'SF-001');
+});
+
+section('Phase 4B: School Fees — update');
+
+check('schoolFees.update performs a partial update and recalculates Balance', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = { Payment_ID: 'SF-003', Amount_Paid: 600 };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.update' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.update', payload: payload }) }
+  }).getContent());
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Payment_ID, 'SF-003');
+    eq(env.data.Amount_Paid, 600);
+    eq(env.data.Balance, 600, 'Balance should be recalculated');
+    eq(env.data.Status, 'Partial');
+  }
+});
+
+check('schoolFees.update: the stored Payment_ID is never changed', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-002', Reference: 'UPDATED-REF' });
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Payment_ID, 'SF-002', 'Payment_ID must remain unchanged');
+    eq(env.data.Reference, 'UPDATED-REF');
+  }
+  ok(apiA.findSchoolFeeById_('SF-002'), 'the row must still be findable by its own ID after the write');
+  eq(feeIds(ss, 'School_Fees'), ['SF-001', 'SF-002', 'SF-003'],
+    'an update must never add, drop or re-key a row');
+  eq(ss.getSheetByName('School_Fees')._rows[2][0], 'SF-002', 'the ID cell must be left intact');
+  eq(ss.getSheetByName('School_Fees')._rows[2][9], 'UPDATED-REF', 'the edited cell must change in place');
+});
+
+check('schoolFees.update: an unknown Payment_ID targets nothing', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-999', Amount_Paid: 1 });
+  eq(env.success, false);
+  eq(env.error, 'NOT_FOUND');
+  eq(env.details.Payment_ID, 'SF-999');
+  eq(feeIds(ss, 'School_Fees'), ['SF-001', 'SF-002', 'SF-003'], 'a failed update must not write');
+});
+
+check('schoolFees.update: rejects unknown fields', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-002', Middle_Name: 'X' });
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.details.unknownColumns.indexOf('Middle_Name') !== -1, 'should list unknown columns');
+});
+
+check('schoolFees.update: changing Amount_Due recalculates Balance and Status', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-001', Amount_Due: 2400 });
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Amount_Due, 2400);
+    eq(env.data.Amount_Paid, 1200, 'Amount_Paid must be preserved');
+    eq(env.data.Balance, 1200);
+    eq(env.data.Status, 'Partial', 'Status must be derived, not carried over');
+  }
+});
+
+check('schoolFees.update: invalid amounts are rejected without writing', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  [
+    ['Amount_Due', 'abc'],
+    ['Amount_Due', -1],
+    ['Amount_Paid', 'abc'],
+    ['Amount_Paid', -1],
+    ['Amount_Paid', 5000],
+  ].forEach(function (pair) {
+    const payload = { Payment_ID: 'SF-002' };
+    payload[pair[0]] = pair[1];
+    const env = doPostEnvelope(apiA, 'schoolFees.update', payload);
+    eq(env.success, false, pair[0] + '=' + pair[1] + ' must be rejected');
+    eq(env.error, 'VALIDATION_ERROR');
+  });
+  eq(apiA.findSchoolFeeById_('SF-002').record.Amount_Paid, 600, 'the rejected payloads must not be applied');
+});
+
+check('schoolFees.update: a voided payment cannot be updated', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const voidEnv = doPostEnvelope(apiA, 'schoolFees.void', { Payment_ID: 'SF-002' });
+  eq(voidEnv.success, true, voidEnv.message || voidEnv.error);
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-002', Amount_Paid: 999 });
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  eq(env.details.reason, 'voided-payment');
+  eq(apiA.findSchoolFeeById_('SF-002').record.Amount_Paid, 600, 'the voided row must stay untouched');
+});
+
+check('schoolFees.update: client-supplied Recorded_By is ignored', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = { Payment_ID: 'SF-001', Recorded_By: 'EVIL-STF-999' };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.update' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.update', payload: payload }) }
+  }).getContent());
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Recorded_By, 'STF-1',
+      'Recorded_By must not be overwritten by client on update');
+  }
+});
+
+section('Phase 4B: School Fees — void');
+
+check('schoolFees.void soft-corrects a payment to Voided', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.void' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.void', payload: { Payment_ID: 'SF-003' } }) }
+  }).getContent());
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Status, 'Voided');
+    eq(env.data.Payment_ID, 'SF-003');
+    eq(env.data.Student_ID, 'STU-2');
+  }
+});
+
+check('schoolFees.void: a second void is rejected and the first one stands', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const first = doPostEnvelope(apiA, 'schoolFees.void', { Payment_ID: 'SF-003' });
+  eq(first.success, true, first.message || first.error);
+  eq(first.data.Status, 'Voided');
+  const second = doPostEnvelope(apiA, 'schoolFees.void', { Payment_ID: 'SF-003' });
+  eq(second.success, false, 're-voiding must be refused');
+  eq(second.error, 'VALIDATION_ERROR');
+  eq(second.details.reason, 'already-voided');
+  eq(apiA.findSchoolFeeById_('SF-003').record.Status, 'Voided', 'the original void must stand');
+});
+
+check('schoolFees.void: the row is preserved with its financial values', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const voidEnv = doPostEnvelope(apiA, 'schoolFees.void', { Payment_ID: 'SF-003' });
+  eq(voidEnv.success, true, voidEnv.message || voidEnv.error);
+  eq(ss.getSheetByName('School_Fees')._rows.length, 4, 'void is a soft correction, never a delete');
+  const getEnv = doGetEnvelope(apiA, { action: 'schoolFees.get', Payment_ID: 'SF-003' });
+  eq(getEnv.success, true, 'a voided payment must stay retrievable');
+  eq(getEnv.data.Payment_ID, 'SF-003');
+  eq(getEnv.data.Status, 'Voided');
+  eq(getEnv.data.Student_ID, 'STU-2');
+  eq(getEnv.data.Amount_Due, 1200, 'voiding must not change the amounts');
+  eq(getEnv.data.Amount_Paid, 0);
+  eq(getEnv.data.Balance, 1200);
+  eq(getEnv.data.Recorded_By, 'STF-1');
+});
+
+check('schoolFees.void: unknown or missing Payment_ID fails safely', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const missing = doPostEnvelope(apiA, 'schoolFees.void', {});
+  eq(missing.success, false);
+  eq(missing.error, 'VALIDATION_ERROR');
+  eq(missing.details.field, 'Payment_ID');
+  const unknown = doPostEnvelope(apiA, 'schoolFees.void', { Payment_ID: 'SF-999' });
+  eq(unknown.success, false);
+  eq(unknown.error, 'NOT_FOUND');
+  eq(ss.getSheetByName('School_Fees')._rows.length, 4, 'a failed void must not write');
+});
+
+section('Phase 4B: Feeding Fees — routing, create, get, list');
+
+check('feedingFees.list action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('feedingFees.list') !== -1, 'feedingFees.list must be routed');
+});
+
+check('feedingFees.get action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('feedingFees.get') !== -1, 'feedingFees.get must be routed');
+});
+
+check('feedingFees.create action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('feedingFees.create') !== -1, 'feedingFees.create must be routed');
+});
+
+check('feedingFees.update action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('feedingFees.update') !== -1, 'feedingFees.update must be routed');
+});
+
+check('feedingFees.void action is routed', function () {
+  ok(api.listAvailableActions_().indexOf('feedingFees.void') !== -1, 'feedingFees.void must be routed');
+});
+
+check('feedingFees.create: admin can create a feeding fee payment with server-generated FF- ID', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 300,
+    Amount_Paid: 300,
+    Payment_Method: 'Mobile Money',
+    Payment_Date: '2025-09-20',
+    Reference: 'FF-TEST-001'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'feedingFees.create' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.create', payload: payload }) }
+  }).getContent());
+  ok(env.success, 'create should succeed: ' + (env.message || env.error));
+  if (env.success) {
+    ok(env.data.Payment_ID && env.data.Payment_ID.indexOf('FF-') === 0,
+      'stored record must have a server-generated FF- ID, got: ' + env.data.Payment_ID);
+    eq(env.data.Student_ID, 'STU-2');
+    eq(env.data.Balance, 0);
+    eq(env.data.Status, 'Paid');
+    eq(env.data.Recorded_By, 'STF-1', 'Recorded_By must come from authenticated user');
+  }
+});
+
+check('feedingFees.create: Recorded_By from authenticated user, not client', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 250,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20',
+    Recorded_By: 'EVIL-STF-999'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'feedingFees.create' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.create', payload: payload }) }
+  }).getContent());
+  ok(env.success, 'create should succeed: ' + (env.message || env.error));
+  if (env.success) {
+    eq(env.data.Recorded_By, 'STF-1',
+      'Recorded_By must be the authenticated user\'s staff ID, not client-supplied');
+  }
+});
+
+check('feedingFees.create: Amount_Paid > Amount_Due is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 200,
+    Amount_Paid: 500,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'feedingFees.create' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+});
+
+check('feedingFees.get returns an existing payment', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'feedingFees.get', Payment_ID: 'FF-001' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    eq(env.data.Payment_ID, 'FF-001');
+    eq(env.data.Student_ID, 'STU-1');
+    eq(env.data.Amount_Due, 450);
+    eq(env.data.Balance, 0);
+  }
+});
+
+check('feedingFees.get returns NOT_FOUND for a missing payment', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'feedingFees.get', Payment_ID: 'FF-999' }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'NOT_FOUND');
+});
+
+check('feedingFees.list returns all records', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'feedingFees.list' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    ok(Array.isArray(env.data));
+    ok(env.data.length >= 2, 'should have at least 2 pre-populated records');
+  }
+});
+
+check('feedingFees.list filters by Student_ID', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'feedingFees.list', Student_ID: 'STU-1' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    ok(Array.isArray(env.data));
+    env.data.forEach(function (p) { eq(p.Student_ID, 'STU-1'); });
+  }
+});
+
+check('feedingFees.list filters by Status', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doGet({
+    parameter: { action: 'feedingFees.list', Status: 'Partial' }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    ok(Array.isArray(env.data));
+    env.data.forEach(function (p) { eq(p.Status, 'Partial'); });
+  }
+});
+
+check('feedingFees.create: client-supplied Payment_ID is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ Payment_ID: 'FF-999' }));
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.message.indexOf('server-generated') !== -1, 'message should explain the rule');
+});
+
+check('feedingFees.create: rejects unknown fields', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ Middle_Name: 'X' }));
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.details.unknownColumns.indexOf('Middle_Name') !== -1, 'should list unknown columns');
+  ok(env.details.validColumns.indexOf('Payment_ID') !== -1, 'should list the valid columns');
+});
+
+check('feedingFees.create: client-supplied Balance is ignored and recalculated', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ Amount_Paid: 120, Balance: 9999 }));
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Balance, 180, 'Balance must be recalculated as Amount_Due - Amount_Paid');
+    eq(env.data.Status, 'Partial');
+  }
+});
+
+check('feedingFees.create: non-numeric or negative amounts are rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  [
+    ['Amount_Due', 'abc'],
+    ['Amount_Paid', 'abc'],
+    ['Amount_Due', -1],
+    ['Amount_Paid', -1],
+    ['Amount_Paid', 5000],
+  ].forEach(function (pair) {
+    const env = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ [pair[0]]: pair[1] }));
+    eq(env.success, false, pair[0] + '=' + pair[1] + ' must be rejected');
+    eq(env.error, 'VALIDATION_ERROR');
+  });
+});
+
+check('feedingFees.create: every required field is enforced', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  ['Student_ID', 'Academic_Year', 'Term', 'Amount_Due', 'Amount_Paid',
+    'Payment_Method', 'Payment_Date'].forEach(function (field) {
+    const env = doPostEnvelope(apiA, 'feedingFees.create', payloadWithout(ffCreatePayload(), field));
+    eq(env.success, false, field + ' is required');
+    eq(env.error, 'VALIDATION_ERROR');
+    ok(env.details.missingFields.indexOf(field) !== -1, 'should flag missing ' + field);
+  });
+});
+
+check('feedingFees.create: invalid Payment_Method and Payment_Date are rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const method = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ Payment_Method: 'Bitcoin' }));
+  eq(method.success, false);
+  eq(method.error, 'VALIDATION_ERROR');
+  ok(method.details.allowedValues.indexOf('Cash') !== -1, 'should list allowed payment methods');
+  const date = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ Payment_Date: 'not-a-date' }));
+  eq(date.success, false);
+  eq(date.error, 'VALIDATION_ERROR');
+  eq(date.details.field, 'Payment_Date');
+});
+
+check('feedingFees.create: nonexistent or withdrawn students are rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const missing = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ Student_ID: 'STU-999' }));
+  eq(missing.success, false);
+  eq(missing.error, 'NOT_FOUND');
+  const withdrawn = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ Student_ID: 'STU-3' }));
+  eq(withdrawn.success, false);
+  eq(withdrawn.error, 'VALIDATION_ERROR');
+  eq(withdrawn.details.reason, 'student-withdrawn');
+});
+
+check('feedingFees.create: generated IDs are sequential and never reused', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const first = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload());
+  const second = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload());
+  eq(first.data.Payment_ID, 'FF-003', 'the next ID must follow the highest stored ID');
+  eq(second.data.Payment_ID, 'FF-004');
+  eq(feeIds(ss, 'Feeding_Fees'), ['FF-001', 'FF-002', 'FF-003', 'FF-004'],
+    'each create appends exactly one row and never rewrites an existing ID');
+});
+
+check('feedingFees.create: refuses a duplicate server-generated Payment_ID', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const realFind = apiA.findFeedingFeeById_;
+  apiA.findFeedingFeeById_ = function () {
+    return { sheetRow: 2, record: {} };
+  };
+  const env = doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload());
+  apiA.findFeedingFeeById_ = realFind;
+  eq(env.success, false);
+  eq(env.error, 'CONFLICT');
+  ok(env.message.indexOf('Duplicate Payment_ID') !== -1, 'message should name the collision');
+});
+
+check('feedingFees.get requires a Payment_ID', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doGetEnvelope(apiA, { action: 'feedingFees.get' });
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  eq(env.details.field, 'Payment_ID');
+});
+
+check('feedingFees.list filters by Academic_Year and Term', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const byYear = doGetEnvelope(apiA, { action: 'feedingFees.list', Academic_Year: '2025/2026' });
+  eq(byYear.success, true);
+  eq(byYear.data.length, 2, 'both fixture payments are 2025/2026');
+  const byTerm = doGetEnvelope(apiA, { action: 'feedingFees.list', Term: 'Term 3' });
+  eq(byTerm.success, true);
+  eq(byTerm.data, [], 'no fixture payment is in Term 3');
+});
+
+check('feedingFees.list returns an empty array when nothing matches', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doGetEnvelope(apiA, { action: 'feedingFees.list', Status: 'Voided' });
+  eq(env.success, true);
+  eq(env.data, [], 'no matches is an empty list, not an error');
+});
+
+section('Phase 4B: Feeding Fees — update and void');
+
+check('feedingFees.update performs a partial update and recalculates Balance', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = { Payment_ID: 'FF-002', Amount_Paid: 450 };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'feedingFees.update' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.update', payload: payload }) }
+  }).getContent());
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Payment_ID, 'FF-002');
+    eq(env.data.Amount_Paid, 450);
+    eq(env.data.Balance, 0);
+    eq(env.data.Status, 'Paid');
+  }
+});
+
+check('feedingFees.update: Recorded_By from authenticated user, not client', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const payload = { Payment_ID: 'FF-001', Recorded_By: 'EVIL-STF-999' };
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'feedingFees.update' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.update', payload: payload }) }
+  }).getContent());
+  eq(env.success, true);
+  if (env.success) {
+    eq(env.data.Recorded_By, 'STF-1',
+      'Recorded_By must not be overwritten by client on update');
+  }
+});
+
+check('feedingFees.update: the stored Payment_ID is never changed', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const env = doPostEnvelope(apiA, 'feedingFees.update', { Payment_ID: 'FF-002', Reference: 'UPDATED-REF' });
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Payment_ID, 'FF-002');
+    eq(env.data.Reference, 'UPDATED-REF');
+  }
+  ok(apiA.findFeedingFeeById_('FF-002'), 'the row must still be findable by its own ID after the write');
+  eq(feeIds(ss, 'Feeding_Fees'), ['FF-001', 'FF-002'], 'an update must never add, drop or re-key a row');
+  eq(ss.getSheetByName('Feeding_Fees')._rows[2][0], 'FF-002', 'the ID cell must be left intact');
+});
+
+check('feedingFees.update: an unknown Payment_ID targets nothing', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const env = doPostEnvelope(apiA, 'feedingFees.update', { Payment_ID: 'FF-999', Amount_Paid: 1 });
+  eq(env.success, false);
+  eq(env.error, 'NOT_FOUND');
+  eq(env.details.Payment_ID, 'FF-999');
+  eq(feeIds(ss, 'Feeding_Fees'), ['FF-001', 'FF-002'], 'a failed update must not write');
+});
+
+check('feedingFees.update: rejects unknown fields', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'feedingFees.update', { Payment_ID: 'FF-002', Middle_Name: 'X' });
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.details.unknownColumns.indexOf('Middle_Name') !== -1, 'should list unknown columns');
+});
+
+check('feedingFees.update: changing Amount_Due recalculates Balance and Status', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'feedingFees.update', { Payment_ID: 'FF-001', Amount_Due: 900 });
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Amount_Due, 900);
+    eq(env.data.Amount_Paid, 450, 'Amount_Paid must be preserved');
+    eq(env.data.Balance, 450);
+    eq(env.data.Status, 'Partial', 'Status must be derived, not carried over');
+  }
+});
+
+check('feedingFees.update: invalid amounts are rejected without writing', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  [
+    ['Amount_Due', 'abc'],
+    ['Amount_Paid', -1],
+    ['Amount_Paid', 5000],
+  ].forEach(function (pair) {
+    const payload = { Payment_ID: 'FF-002' };
+    payload[pair[0]] = pair[1];
+    const env = doPostEnvelope(apiA, 'feedingFees.update', payload);
+    eq(env.success, false, pair[0] + '=' + pair[1] + ' must be rejected');
+    eq(env.error, 'VALIDATION_ERROR');
+  });
+  eq(apiA.findFeedingFeeById_('FF-002').record.Amount_Paid, 225, 'the rejected payloads must not be applied');
+});
+
+check('feedingFees.update: a voided payment cannot be updated', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const voidEnv = doPostEnvelope(apiA, 'feedingFees.void', { Payment_ID: 'FF-002' });
+  eq(voidEnv.success, true, voidEnv.message || voidEnv.error);
+  const env = doPostEnvelope(apiA, 'feedingFees.update', { Payment_ID: 'FF-002', Amount_Paid: 999 });
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  eq(env.details.reason, 'voided-payment');
+  eq(apiA.findFeedingFeeById_('FF-002').record.Amount_Paid, 225, 'the voided row must stay untouched');
+});
+
+check('feedingFees.void soft-corrects a payment to Voided', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = JSON.parse(apiA.doPost({
+    parameter: { action: 'feedingFees.void' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.void', payload: { Payment_ID: 'FF-002' } }) }
+  }).getContent());
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Status, 'Voided');
+    eq(env.data.Payment_ID, 'FF-002');
+  }
+});
+
+check('feedingFees.void: a second void is rejected and the first one stands', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const first = doPostEnvelope(apiA, 'feedingFees.void', { Payment_ID: 'FF-002' });
+  eq(first.success, true, first.message || first.error);
+  eq(first.data.Status, 'Voided');
+  const second = doPostEnvelope(apiA, 'feedingFees.void', { Payment_ID: 'FF-002' });
+  eq(second.success, false, 're-voiding must be refused');
+  eq(second.error, 'VALIDATION_ERROR');
+  eq(second.details.reason, 'already-voided');
+  eq(apiA.findFeedingFeeById_('FF-002').record.Status, 'Voided', 'the original void must stand');
+});
+
+check('feedingFees.void: the row is preserved with its financial values', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const voidEnv = doPostEnvelope(apiA, 'feedingFees.void', { Payment_ID: 'FF-002' });
+  eq(voidEnv.success, true, voidEnv.message || voidEnv.error);
+  eq(ss.getSheetByName('Feeding_Fees')._rows.length, 3, 'void is a soft correction, never a delete');
+  const getEnv = doGetEnvelope(apiA, { action: 'feedingFees.get', Payment_ID: 'FF-002' });
+  eq(getEnv.success, true, 'a voided payment must stay retrievable');
+  eq(getEnv.data.Status, 'Voided');
+  eq(getEnv.data.Student_ID, 'STU-2');
+  eq(getEnv.data.Amount_Due, 450, 'voiding must not change the amounts');
+  eq(getEnv.data.Amount_Paid, 225);
+  eq(getEnv.data.Balance, 225);
+});
+
+check('feedingFees.void: unknown or missing Payment_ID fails safely', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const missing = doPostEnvelope(apiA, 'feedingFees.void', {});
+  eq(missing.success, false);
+  eq(missing.error, 'VALIDATION_ERROR');
+  eq(missing.details.field, 'Payment_ID');
+  const unknown = doPostEnvelope(apiA, 'feedingFees.void', { Payment_ID: 'FF-999' });
+  eq(unknown.success, false);
+  eq(unknown.error, 'NOT_FOUND');
+  eq(ss.getSheetByName('Feeding_Fees')._rows.length, 3, 'a failed void must not write');
+});
+
+section('Phase 4B: Authorization');
+
+check('schoolFees.create requires SCHOOL_FEES.CREATE (teacher is FORBIDDEN)', function () {
+  const apiT = loadBackendAs('teacher@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 1000,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiT.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'FORBIDDEN');
+});
+
+check('schoolFees.void requires SCHOOL_FEES.VOID (teacher is FORBIDDEN)', function () {
+  const apiT = loadBackendAs('teacher@school.edu');
+  const env = JSON.parse(apiT.doPost({
+    parameter: { action: 'schoolFees.void' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.void', payload: { Payment_ID: 'SF-001' } }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'FORBIDDEN');
+});
+
+check('feedingFees.create requires FEEDING_FEES.CREATE (teacher is FORBIDDEN)', function () {
+  const apiT = loadBackendAs('teacher@school.edu');
+  const payload = {
+    Student_ID: 'STU-2',
+    Academic_Year: '2025/2026',
+    Term: 'Term 1',
+    Amount_Due: 500,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-20'
+  };
+  const env = JSON.parse(apiT.doPost({
+    parameter: { action: 'feedingFees.create' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.create', payload: payload }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'FORBIDDEN');
+});
+
+check('feedingFees.void requires FEEDING_FEES.VOID (teacher is FORBIDDEN)', function () {
+  const apiT = loadBackendAs('teacher@school.edu');
+  const env = JSON.parse(apiT.doPost({
+    parameter: { action: 'feedingFees.void' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.void', payload: { Payment_ID: 'FF-001' } }) }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'FORBIDDEN');
+});
+
+check('schoolFees.list requires SCHOOL_FEES.READ (teacher is FORBIDDEN)', function () {
+  const apiT = loadBackendAs('teacher@school.edu');
+  const env = JSON.parse(apiT.doGet({
+    parameter: { action: 'schoolFees.list' }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'FORBIDDEN');
+});
+
+check('feedingFees.list requires FEEDING_FEES.READ (teacher is FORBIDDEN)', function () {
+  const apiT = loadBackendAs('teacher@school.edu');
+  const env = JSON.parse(apiT.doGet({
+    parameter: { action: 'feedingFees.list' }
+  }).getContent());
+  eq(env.success, false);
+  eq(env.error, 'FORBIDDEN');
+});
+
+check('Phase 4B: fee handlers authorize through the central requirePermission_ mechanism', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const calls = [];
+  const original = apiA.requirePermission_;
+  apiA.requirePermission_ = function (permission) {
+    calls.push(permission);
+    return original(permission);
+  };
+  doGetEnvelope(apiA, { action: 'schoolFees.list' });
+  doGetEnvelope(apiA, { action: 'schoolFees.get', Payment_ID: 'SF-001' });
+  doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload({ Reference: 'AUTH-SF-1' }));
+  doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-001', Notes: 'authorized' });
+  doPostEnvelope(apiA, 'schoolFees.void', { Payment_ID: 'SF-001' });
+  doGetEnvelope(apiA, { action: 'feedingFees.list' });
+  doGetEnvelope(apiA, { action: 'feedingFees.get', Payment_ID: 'FF-001' });
+  doPostEnvelope(apiA, 'feedingFees.create', ffCreatePayload({ Reference: 'AUTH-FF-1' }));
+  doPostEnvelope(apiA, 'feedingFees.update', { Payment_ID: 'FF-001', Notes: 'authorized' });
+  doPostEnvelope(apiA, 'feedingFees.void', { Payment_ID: 'FF-001' });
+  apiA.requirePermission_ = original;
+  eq(calls, [
+    'SCHOOL_FEES.READ', 'SCHOOL_FEES.READ', 'SCHOOL_FEES.CREATE', 'SCHOOL_FEES.UPDATE',
+    'SCHOOL_FEES.VOID',
+    'FEEDING_FEES.READ', 'FEEDING_FEES.READ', 'FEEDING_FEES.CREATE', 'FEEDING_FEES.UPDATE',
+    'FEEDING_FEES.VOID',
+  ], 'every fee action must go through the Phase 4A mechanism with its own code');
+});
+
+check('Phase 4B: fee permission codes come from the Phase 4A catalog', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const admin = apiA.requireAuthentication_();
+  P4B_FEE_PERMISSIONS.forEach(function (code) {
+    ok(CONFIG.PERMISSION_CODES.indexOf(code) !== -1, code + ' must be a catalog code');
+    eq(apiA.hasPermission_(admin, code), true, 'Admin must hold ' + code);
+  });
+});
+
+check('Phase 4B: a role holding only READ may read fees but not write them', function () {
+  const ss = p4bSpreadsheet({
+    users: [['USR-3', 'STF-3', 'viewer@school.edu', 'Viewer', 'Active', '']],
+    roles: [
+      ['ROL-1', 'Admin', 'Full system administrator', 'Active'],
+      ['ROL-3', 'Viewer', 'Read-only fee viewer', 'Active'],
+    ],
+    mappings: [
+      ['RP-1', 'ROL-3', permIdFor('SCHOOL_FEES.READ'), 'Active'],
+      ['RP-2', 'ROL-3', permIdFor('FEEDING_FEES.READ'), 'Active'],
+      ['RP-3', 'ROL-3', permIdFor('STUDENTS.READ'), 'Active'],
+    ],
+  });
+  const apiV = loadBackendAs('viewer@school.edu', ss);
+  eq(doGetEnvelope(apiV, { action: 'schoolFees.list' }).success, true, 'SCHOOL_FEES.READ allows list');
+  eq(doGetEnvelope(apiV, { action: 'schoolFees.get', Payment_ID: 'SF-001' }).success, true);
+  eq(doGetEnvelope(apiV, { action: 'feedingFees.list' }).success, true, 'FEEDING_FEES.READ allows list');
+  eq(doGetEnvelope(apiV, { action: 'feedingFees.get', Payment_ID: 'FF-001' }).success, true);
+  [
+    ['schoolFees.create', 'SCHOOL_FEES.CREATE'],
+    ['schoolFees.update', 'SCHOOL_FEES.UPDATE'],
+    ['schoolFees.void', 'SCHOOL_FEES.VOID'],
+    ['feedingFees.create', 'FEEDING_FEES.CREATE'],
+    ['feedingFees.update', 'FEEDING_FEES.UPDATE'],
+    ['feedingFees.void', 'FEEDING_FEES.VOID'],
+  ].forEach(function (pair) {
+    const env = doPostEnvelope(apiV, pair[0], { Payment_ID: 'SF-001' });
+    eq(env.success, false, pair[0] + ' must be denied without ' + pair[1]);
+    eq(env.error, ERROR_CODES.FORBIDDEN, pair[0] + ' must be FORBIDDEN');
+    eq(env.details.permission, pair[1], 'the denial must name the missing permission');
+  });
+});
+
+check('Phase 4B: unauthenticated callers cannot read or write fees', function () {
+  const anon = loadBackendAs('', makeFullSpreadsheet());
+  ['schoolFees.list', 'schoolFees.get', 'feedingFees.list', 'feedingFees.get'].forEach(function (action) {
+    const env = doGetEnvelope(anon, { action: action, Payment_ID: 'SF-001' });
+    eq(env.success, false, action + ' must require authentication');
+    eq(env.error, ERROR_CODES.UNAUTHORIZED, action + ' must be UNAUTHORIZED');
+  });
+  ['schoolFees.create', 'schoolFees.update', 'schoolFees.void',
+    'feedingFees.create', 'feedingFees.update', 'feedingFees.void'].forEach(function (action) {
+    const env = doPostEnvelope(anon, action, { Payment_ID: 'SF-001' });
+    eq(env.success, false, action + ' must require authentication');
+    eq(env.error, ERROR_CODES.UNAUTHORIZED, action + ' must be UNAUTHORIZED');
+  });
+});
+
+section('Phase 4B: Error handling and safety');
+
+check('schoolFees.list fails safely when the School_Fees tab has no header row', function () {
+  const ss = makeFullSpreadsheet();
+  ss.getSheetByName('School_Fees')._rows = [];
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const env = doGetEnvelope(apiA, { action: 'schoolFees.list' });
+  eq(env.success, false);
+  eq(env.error, ERROR_CODES.SERVER_ERROR, 'a headerless tab is a structural failure');
+  eq(env.details.sheet, 'School_Fees');
+});
+
+check('schoolFees fails safely when the School_Fees tab is missing entirely', function () {
+  const apiMissing = loadBackendAs('admin@school.edu', p4bSpreadsheetWithoutTab('School_Fees'));
+  const list = doGetEnvelope(apiMissing, { action: 'schoolFees.list' });
+  eq(list.success, false);
+  eq(list.error, ERROR_CODES.SERVER_ERROR);
+  eq(list.details.sheet, 'School_Fees');
+  eq(list.details.reason, 'sheet-missing');
+  const create = doPostEnvelope(apiMissing, 'schoolFees.create', sfCreatePayload());
+  eq(create.success, false);
+  eq(create.error, ERROR_CODES.SERVER_ERROR);
+  const update = doPostEnvelope(apiMissing, 'schoolFees.update', { Payment_ID: 'SF-001', Notes: 'x' });
+  eq(update.success, false);
+  eq(update.error, ERROR_CODES.NOT_FOUND, 'a missing tab cannot contain the row being edited');
+  const voidEnv = doPostEnvelope(apiMissing, 'schoolFees.void', { Payment_ID: 'SF-001' });
+  eq(voidEnv.success, false);
+  eq(voidEnv.error, ERROR_CODES.NOT_FOUND);
+});
+
+check('schoolFees.list on an empty module sheet returns an empty list', function () {
+  const ss = makeFullSpreadsheet();
+  const sheet = ss.getSheetByName('School_Fees');
+  sheet._rows = [sheet._rows[0]];
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const env = doGetEnvelope(apiA, { action: 'schoolFees.list' });
+  eq(env.success, true);
+  eq(env.data, []);
+});
+
+check('Phase 4B: schoolFees writes respect script locking', function () {
+  [
+    ['schoolFees.create', sfCreatePayload()],
+    ['schoolFees.update', { Payment_ID: 'SF-001', Notes: 'locked' }],
+    ['schoolFees.void', { Payment_ID: 'SF-001' }],
+  ].forEach(function (pair) {
+    const ss = makeFullSpreadsheet();
+    const apiLocked = loadBackendAs('admin@school.edu', ss, { lockUnavailable: true });
+    const env = doPostEnvelope(apiLocked, pair[0], pair[1]);
+    eq(env.success, false, pair[0] + ' must not write without the script lock');
+    eq(env.error, ERROR_CODES.CONFLICT, pair[0] + ' must report CONFLICT');
+    eq(feeIds(ss, 'School_Fees'), ['SF-001', 'SF-002', 'SF-003'],
+      pair[0] + ' must leave the sheet untouched');
+    eq(apiLocked.findSchoolFeeById_('SF-001').record.Status, 'Paid',
+      pair[0] + ' must not change any stored value');
+  });
+});
+
+check('feedingFees.list fails safely when the Feeding_Fees tab has no header row', function () {
+  const ss = makeFullSpreadsheet();
+  ss.getSheetByName('Feeding_Fees')._rows = [];
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const env = doGetEnvelope(apiA, { action: 'feedingFees.list' });
+  eq(env.success, false);
+  eq(env.error, ERROR_CODES.SERVER_ERROR, 'a headerless tab is a structural failure');
+  eq(env.details.sheet, 'Feeding_Fees');
+});
+
+check('feedingFees fails safely when the Feeding_Fees tab is missing entirely', function () {
+  const apiMissing = loadBackendAs('admin@school.edu', p4bSpreadsheetWithoutTab('Feeding_Fees'));
+  const list = doGetEnvelope(apiMissing, { action: 'feedingFees.list' });
+  eq(list.success, false);
+  eq(list.error, ERROR_CODES.SERVER_ERROR);
+  eq(list.details.sheet, 'Feeding_Fees');
+  eq(list.details.reason, 'sheet-missing');
+  const create = doPostEnvelope(apiMissing, 'feedingFees.create', ffCreatePayload());
+  eq(create.success, false);
+  eq(create.error, ERROR_CODES.SERVER_ERROR);
+  const update = doPostEnvelope(apiMissing, 'feedingFees.update', { Payment_ID: 'FF-001', Notes: 'x' });
+  eq(update.success, false);
+  eq(update.error, ERROR_CODES.NOT_FOUND);
+  const voidEnv = doPostEnvelope(apiMissing, 'feedingFees.void', { Payment_ID: 'FF-001' });
+  eq(voidEnv.success, false);
+  eq(voidEnv.error, ERROR_CODES.NOT_FOUND);
+});
+
+check('feedingFees.list on an empty module sheet returns an empty list', function () {
+  const ss = makeFullSpreadsheet();
+  const sheet = ss.getSheetByName('Feeding_Fees');
+  sheet._rows = [sheet._rows[0]];
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const env = doGetEnvelope(apiA, { action: 'feedingFees.list' });
+  eq(env.success, true);
+  eq(env.data, []);
+});
+
+check('Phase 4B: feedingFees writes respect script locking', function () {
+  [
+    ['feedingFees.create', ffCreatePayload()],
+    ['feedingFees.update', { Payment_ID: 'FF-001', Notes: 'locked' }],
+    ['feedingFees.void', { Payment_ID: 'FF-001' }],
+  ].forEach(function (pair) {
+    const ss = makeFullSpreadsheet();
+    const apiLocked = loadBackendAs('admin@school.edu', ss, { lockUnavailable: true });
+    const env = doPostEnvelope(apiLocked, pair[0], pair[1]);
+    eq(env.success, false, pair[0] + ' must not write without the script lock');
+    eq(env.error, ERROR_CODES.CONFLICT, pair[0] + ' must report CONFLICT');
+    eq(feeIds(ss, 'Feeding_Fees'), ['FF-001', 'FF-002'],
+      pair[0] + ' must leave the sheet untouched');
+    eq(apiLocked.findFeedingFeeById_('FF-001').record.Status, 'Paid',
+      pair[0] + ' must not change any stored value');
+  });
+});
+
+check('Phase 4B: schoolFees.update decides and writes inside the script lock', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const statusCol = feeColIndex(ss, 'School_Fees', 'Status');
+  const row = feeRowOf(ss, 'School_Fees', 'SF-003');
+  const log = observeSheetAccess(apiA, 'School_Fees');
+
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-003', Amount_Paid: 1200 });
+  eq(env.success, true, 'the update should succeed');
+  eq(env.data.Status, 'Paid', 'paying the balance in full must recalculate the status');
+  eq(apiA.__lockDepth, 0, 'the critical section must be released before the response is returned');
+
+  const reads = fullRowReads(log, row);
+  eq(reads.length, 2, 'the row is read once to decide and once to refresh the response');
+  reads.forEach(function (entry) {
+    ok(entry.depth > 0, 'the stored row must never be read outside the critical section');
+  });
+  eq(reads[0].values[0][statusCol], 'Unpaid',
+    'the deciding read must be the stored pre-update row (Unpaid), read under the lock');
+  eq(reads[1].values[0][statusCol], 'Paid', 'the refresh read must see the recalculated status');
+
+  const writes = log.filter(function (entry) { return entry.op === 'write'; });
+  eq(writes.length, 1, 'the update must write the row exactly once');
+  ok(writes[0].depth > 0, 'the row write must happen inside the critical section');
+  eq(writes[0].values[0][statusCol], 'Paid');
+});
+
+check('Phase 4B: schoolFees.void decides inside the script lock', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const statusCol = feeColIndex(ss, 'School_Fees', 'Status');
+  const row = feeRowOf(ss, 'School_Fees', 'SF-002');
+
+  const first = doPostEnvelope(apiA, 'schoolFees.void', { Payment_ID: 'SF-002' });
+  eq(first.success, true, 'the first void should succeed');
+  eq(first.data.Status, 'Voided');
+
+  // Only the rejected second void is observed: its already-voided decision must
+  // come from a re-read taken while the lock is held.
+  const log = observeSheetAccess(apiA, 'School_Fees');
+  const second = doPostEnvelope(apiA, 'schoolFees.void', { Payment_ID: 'SF-002' });
+  eq(second.success, false);
+  eq(second.error, ERROR_CODES.VALIDATION_ERROR);
+  eq(second.details.reason, 'already-voided');
+
+  const reads = fullRowReads(log, row);
+  ok(reads.length >= 1, 'the stored row must be re-read before the decision');
+  reads.forEach(function (entry) {
+    ok(entry.depth > 0, 'the re-read must happen inside the critical section');
+  });
+  eq(reads[0].values[0][statusCol], 'Voided', 'the decision must use the freshly read status');
+  eq(log.filter(function (entry) { return entry.op === 'write'; }).length, 0,
+    'a rejected void must not write to the sheet');
+});
+
+check('Phase 4B: schoolFees.update is serialized against a void racing the lock', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const rows = ss.getSheetByName('School_Fees')._rows;
+  const statusCol = feeColIndex(ss, 'School_Fees', 'Status');
+  const paidCol = feeColIndex(ss, 'School_Fees', 'Amount_Paid');
+  const row = feeRowOf(ss, 'School_Fees', 'SF-001');
+
+  // "Another user's" void commits in the window between this call taking the
+  // lock and its first read, i.e. exactly where a pre-lock decision would miss
+  // it. The handler must therefore re-read under the lock before deciding.
+  const state = { commits: 0, depth: -1 };
+  const realFind = apiA.findSchoolFeeById_;
+  apiA.findSchoolFeeById_ = function (id) {
+    if (state.commits === 0) {
+      state.commits += 1;
+      state.depth = apiA.__lockDepth;
+      rows[row - 1][statusCol] = 'Voided';
+    }
+    return realFind(id);
+  };
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-001', Amount_Paid: 0 });
+  apiA.findSchoolFeeById_ = realFind;
+
+  eq(state.commits, 1, 'the competing void must land before the handler reads the record');
+  ok(state.depth > 0, 'the deciding read must happen while this call already holds the lock');
+  eq(env.success, false, 'the update must not overwrite a void that committed first');
+  eq(env.error, ERROR_CODES.VALIDATION_ERROR);
+  eq(env.details.reason, 'voided-payment');
+  eq(rows[row - 1][statusCol], 'Voided', 'the competing void must be preserved');
+  eq(rows[row - 1][paidCol], 1200, 'no cell of the voided row may be overwritten');
+});
+check('Phase 4B: feedingFees.update decides and writes inside the script lock', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const statusCol = feeColIndex(ss, 'Feeding_Fees', 'Status');
+  const row = feeRowOf(ss, 'Feeding_Fees', 'FF-002');
+  const log = observeSheetAccess(apiA, 'Feeding_Fees');
+
+  const env = doPostEnvelope(apiA, 'feedingFees.update', { Payment_ID: 'FF-002', Amount_Paid: 450 });
+  eq(env.success, true, 'the update should succeed');
+  eq(env.data.Status, 'Paid', 'paying the balance in full must recalculate the status');
+  eq(apiA.__lockDepth, 0, 'the critical section must be released before the response is returned');
+
+  const reads = fullRowReads(log, row);
+  eq(reads.length, 2, 'the row is read once to decide and once to refresh the response');
+  reads.forEach(function (entry) {
+    ok(entry.depth > 0, 'the stored row must never be read outside the critical section');
+  });
+  eq(reads[0].values[0][statusCol], 'Partial', 'the deciding read must be the stored pre-update row');
+  eq(reads[1].values[0][statusCol], 'Paid', 'the refresh read must see the recalculated status');
+
+  const writes = log.filter(function (entry) { return entry.op === 'write'; });
+  eq(writes.length, 1, 'the update must write the row exactly once');
+  ok(writes[0].depth > 0, 'the row write must happen inside the critical section');
+  eq(writes[0].values[0][statusCol], 'Paid');
+});
+
+check('Phase 4B: feedingFees.void decides inside the script lock', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const statusCol = feeColIndex(ss, 'Feeding_Fees', 'Status');
+  const row = feeRowOf(ss, 'Feeding_Fees', 'FF-002');
+
+  const first = doPostEnvelope(apiA, 'feedingFees.void', { Payment_ID: 'FF-002' });
+  eq(first.success, true, 'the first void should succeed');
+  eq(first.data.Status, 'Voided');
+
+  const log = observeSheetAccess(apiA, 'Feeding_Fees');
+  const second = doPostEnvelope(apiA, 'feedingFees.void', { Payment_ID: 'FF-002' });
+  eq(second.success, false);
+  eq(second.error, ERROR_CODES.VALIDATION_ERROR);
+  eq(second.details.reason, 'already-voided');
+
+  const reads = fullRowReads(log, row);
+  ok(reads.length >= 1, 'the stored row must be re-read before the decision');
+  reads.forEach(function (entry) {
+    ok(entry.depth > 0, 'the re-read must happen inside the critical section');
+  });
+  eq(reads[0].values[0][statusCol], 'Voided', 'the decision must use the freshly read status');
+  eq(log.filter(function (entry) { return entry.op === 'write'; }).length, 0,
+    'a rejected void must not write to the sheet');
+});
+
+check('Phase 4B: feedingFees.update is serialized against a void racing the lock', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const rows = ss.getSheetByName('Feeding_Fees')._rows;
+  const statusCol = feeColIndex(ss, 'Feeding_Fees', 'Status');
+  const paidCol = feeColIndex(ss, 'Feeding_Fees', 'Amount_Paid');
+  const row = feeRowOf(ss, 'Feeding_Fees', 'FF-001');
+
+  const state = { commits: 0, depth: -1 };
+  const realFind = apiA.findFeedingFeeById_;
+  apiA.findFeedingFeeById_ = function (id) {
+    if (state.commits === 0) {
+      state.commits += 1;
+      state.depth = apiA.__lockDepth;
+      rows[row - 1][statusCol] = 'Voided';
+    }
+    return realFind(id);
+  };
+  const env = doPostEnvelope(apiA, 'feedingFees.update', { Payment_ID: 'FF-001', Amount_Paid: 0 });
+  apiA.findFeedingFeeById_ = realFind;
+
+  eq(state.commits, 1, 'the competing void must land before the handler reads the record');
+  ok(state.depth > 0, 'the deciding read must happen while this call already holds the lock');
+  eq(env.success, false, 'the update must not overwrite a void that committed first');
+  eq(env.error, ERROR_CODES.VALIDATION_ERROR);
+  eq(env.details.reason, 'voided-payment');
+  eq(rows[row - 1][statusCol], 'Voided', 'the competing void must be preserved');
+  eq(rows[row - 1][paidCol], 450, 'no cell of the voided row may be overwritten');
+});
+
+
+section('Phase 4B: Full lifecycle integration');
+
+check('Phase 4B: complete school fee lifecycle — create, get, update, void', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const createPayload = {
+    Student_ID: 'STU-1',
+    Academic_Year: '2025/2026',
+    Term: 'Term 3',
+    Amount_Due: 2000,
+    Amount_Paid: 1000,
+    Payment_Method: 'Bank Transfer',
+    Payment_Date: '2025-09-01',
+    Reference: 'LIFECYCLE-TEST-SF-001',
+    Notes: 'Lifecycle test'
+  };
+  const createEnv = JSON.parse(apiA.doPost({
+    parameter: { action: 'schoolFees.create' },
+    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: createPayload }) }
+  }).getContent());
+  ok(createEnv.success, 'create should succeed: ' + (createEnv.message || createEnv.error));
+  if (createEnv.success) {
+    const newId = createEnv.data.Payment_ID;
+    ok(newId.indexOf('SF-') === 0, 'should have SF- prefix: ' + newId);
+    eq(createEnv.data.Student_ID, 'STU-1');
+    eq(createEnv.data.Balance, 1000);
+    eq(createEnv.data.Status, 'Partial');
+    eq(createEnv.data.Recorded_By, 'STF-1');
+
+    const getEnv = JSON.parse(apiA.doGet({
+      parameter: { action: 'schoolFees.get', Payment_ID: newId }
+    }).getContent());
+    eq(getEnv.success, true);
+    if (getEnv.success) {
+      eq(getEnv.data.Payment_ID, newId);
+      eq(getEnv.data.Balance, 1000);
+    }
+
+    const updateEnv = JSON.parse(apiA.doPost({
+      parameter: { action: 'schoolFees.update' },
+      postData: { contents: JSON.stringify({ action: 'schoolFees.update', payload: { Payment_ID: newId, Amount_Paid: 2000 } }) }
+    }).getContent());
+    eq(updateEnv.success, true);
+    if (updateEnv.success) {
+      eq(updateEnv.data.Balance, 0);
+      eq(updateEnv.data.Status, 'Paid');
+    }
+
+    const voidEnv = JSON.parse(apiA.doPost({
+      parameter: { action: 'schoolFees.void' },
+      postData: { contents: JSON.stringify({ action: 'schoolFees.void', payload: { Payment_ID: newId } }) }
+    }).getContent());
+    eq(voidEnv.success, true);
+    if (voidEnv.success) {
+      eq(voidEnv.data.Status, 'Voided');
+    }
+  }
+});
+
+check('Phase 4B: complete feeding fee lifecycle — create, get, update, void', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const createPayload = {
+    Student_ID: 'STU-1',
+    Academic_Year: '2025/2026',
+    Term: 'Term 3',
+    Amount_Due: 500,
+    Amount_Paid: 0,
+    Payment_Method: 'Cash',
+    Payment_Date: '2025-09-01',
+    Reference: 'LIFECYCLE-TEST-FF-001'
+  };
+  const createEnv = JSON.parse(apiA.doPost({
+    parameter: { action: 'feedingFees.create' },
+    postData: { contents: JSON.stringify({ action: 'feedingFees.create', payload: createPayload }) }
+  }).getContent());
+  ok(createEnv.success, 'create should succeed: ' + (createEnv.message || createEnv.error));
+  if (createEnv.success) {
+    const newId = createEnv.data.Payment_ID;
+    ok(newId.indexOf('FF-') === 0, 'should have FF- prefix: ' + newId);
+    eq(createEnv.data.Student_ID, 'STU-1');
+    eq(createEnv.data.Balance, 500);
+    eq(createEnv.data.Status, 'Unpaid');
+    eq(createEnv.data.Recorded_By, 'STF-1');
+
+    const getEnv = JSON.parse(apiA.doGet({
+      parameter: { action: 'feedingFees.get', Payment_ID: newId }
+    }).getContent());
+    eq(getEnv.success, true);
+    if (getEnv.success) {
+      eq(getEnv.data.Payment_ID, newId);
+      eq(getEnv.data.Balance, 500);
+    }
+
+    const updateEnv = JSON.parse(apiA.doPost({
+      parameter: { action: 'feedingFees.update' },
+      postData: { contents: JSON.stringify({ action: 'feedingFees.update', payload: { Payment_ID: newId, Amount_Paid: 500 } }) }
+    }).getContent());
+    eq(updateEnv.success, true);
+    if (updateEnv.success) {
+      eq(updateEnv.data.Status, 'Paid');
+    }
+
+    const voidEnv = JSON.parse(apiA.doPost({
+      parameter: { action: 'feedingFees.void' },
+      postData: { contents: JSON.stringify({ action: 'feedingFees.void', payload: { Payment_ID: newId } }) }
+    }).getContent());
+    eq(voidEnv.success, true);
+    if (voidEnv.success) {
+      eq(voidEnv.data.Status, 'Voided');
+    }
+  }
+});
+
 section('Phase boundary (no fake implementations)');
 
 check('every reserved (unimplemented) action still reports NOT_FOUND', function () {
   [
-    'schoolFees.create',
-    'feedingFees.list',
     'stationery.fulfill',
     'inventory.stockIn',
-    'salaries.create',
-    'delegations.revoke',
+    'inventory.stockOut',
+    'inventory.movements',
+    'salaries.list',
+    'delegations.list',
     'audit.list',
     'dashboard.summary',
   ].forEach(function (action) {
@@ -2220,9 +4087,15 @@ check('every reserved (unimplemented) action still reports NOT_FOUND', function 
   });
 });
 
-check('no phase-4+ module has been implemented yet', function () {
-  ['SchoolFees.js', 'FeedingFees.js', 'Stationery.js', 'Inventory.js',
-   'Salaries.js', 'Delegations.js', 'Dashboard.js', 'Audit.js'].forEach(function (file) {
+check('Phase 4B fee modules are implemented, later modules still placeholders', function () {
+  // Phase 4B: implemented.
+  ['SchoolFees.js', 'FeedingFees.js'].forEach(function (file) {
+    const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
+    ok(!/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' should be implemented in Phase 4B');
+  });
+  // Phase 5-7 stubs are still untouched placeholders.
+  ['Stationery.js', 'Inventory.js', 'Salaries.js',
+   'Delegations.js', 'Dashboard.js', 'Audit.js'].forEach(function (file) {
     const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
     ok(/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' is no longer an untouched placeholder');
   });

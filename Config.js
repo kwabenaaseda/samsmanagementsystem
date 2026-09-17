@@ -170,12 +170,17 @@ const CONFIG = {
     },
     SCHOOL_FEES: {
       LIST: 'schoolFees.list',
+      GET: 'schoolFees.get',
       CREATE: 'schoolFees.create',
-      BY_STUDENT: 'schoolFees.byStudent'
+      UPDATE: 'schoolFees.update',
+      VOID: 'schoolFees.void'
     },
     FEEDING_FEES: {
       LIST: 'feedingFees.list',
-      CREATE: 'feedingFees.create'
+      GET: 'feedingFees.get',
+      CREATE: 'feedingFees.create',
+      UPDATE: 'feedingFees.update',
+      VOID: 'feedingFees.void'
     },
     STATIONERY: {
       LIST: 'stationery.list',

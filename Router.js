@@ -69,6 +69,16 @@ function getRoutes_() {
   routes[CONFIG.ACTIONS.STAFF.CREATE] = handleStaffCreate_;
   routes[CONFIG.ACTIONS.STAFF.UPDATE] = handleStaffUpdate_;
   routes[CONFIG.ACTIONS.STAFF.DEACTIVATE] = handleStaffDeactivate_;
+  routes[CONFIG.ACTIONS.SCHOOL_FEES.LIST] = handleSchoolFeesList_;
+  routes[CONFIG.ACTIONS.SCHOOL_FEES.GET] = handleSchoolFeesGet_;
+  routes[CONFIG.ACTIONS.SCHOOL_FEES.CREATE] = handleSchoolFeesCreate_;
+  routes[CONFIG.ACTIONS.SCHOOL_FEES.UPDATE] = handleSchoolFeesUpdate_;
+  routes[CONFIG.ACTIONS.SCHOOL_FEES.VOID] = handleSchoolFeesVoid_;
+  routes[CONFIG.ACTIONS.FEEDING_FEES.LIST] = handleFeedingFeesList_;
+  routes[CONFIG.ACTIONS.FEEDING_FEES.GET] = handleFeedingFeesGet_;
+  routes[CONFIG.ACTIONS.FEEDING_FEES.CREATE] = handleFeedingFeesCreate_;
+  routes[CONFIG.ACTIONS.FEEDING_FEES.UPDATE] = handleFeedingFeesUpdate_;
+  routes[CONFIG.ACTIONS.FEEDING_FEES.VOID] = handleFeedingFeesVoid_;
   return routes;
 }
 
