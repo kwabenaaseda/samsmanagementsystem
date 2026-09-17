@@ -16,11 +16,11 @@ Apps Script Web App backend serving a single `doGet` / `doPost` JSON API.
 | --- | --- | --- |
 | `appsscript.json` | Manifest (runtime, web app access, timezone) | complete |
 | `.clasp.json` | clasp target config (`scriptId`, extensions) | complete |
-| `Config.js` | Central `CONFIG`: spreadsheet ID, sheet names, enums, action names | Phases 1-3 complete |
+| `Config.js` | Central `CONFIG`: spreadsheet ID, sheet names, enums, action names, permission catalog | Phases 1-4A complete |
 | `Router.js` | Action dispatcher (`doGet`/`doPost`), route table, `health` action | Phases 1-3 routed |
 | `Response.js` | `success()`, `failure()`, `jsonResponse()` + error-code taxonomy | Phase 1 complete |
 | `Auth.js` | login / session / credential checks | Phase 2 complete |
-| `Permissions.js` | role + permission resolution | Phase 2 complete (temporary Admin-only map) |
+| `Permissions.js` | sheet-driven role→permission resolution + seed | Phase 4A complete |
 | `Audit.js` | append-only audit logging | **empty stub** |
 | `Students.js` | student list/get/create/update/withdraw | Phase 3 complete |
 | `Staff.js` | staff list/get/create/update/deactivate | Phase 3 complete |
@@ -51,9 +51,86 @@ Salaries, Delegations, Dashboard, Audit) and need implementing.
 - **Phase 2** (authentication / authorization): complete.
 - **Phase 3** (Students + Staff): implemented and covered by the test suite
   (route table, CRUD, soft delete, validation, locking, permission errors).
-  Implemented locally only — **not committed, pushed, or deployed yet**; the
-  8 remaining modules above are untouched stubs whose actions still return
-  `NOT_FOUND`.
+- **Phase 4A** (Role_Permissions authorization): implemented; grants now come
+  from the `Role_Permissions` sheet (see the section below). **The seed has
+  not been run on the live spreadsheet yet** — run `setupRolePermissions()`
+  from the Apps Script editor right after the next push.
+- The 8 remaining modules above are untouched stubs whose actions still
+  return `NOT_FOUND`.
+
+## Authorization (Phase 4A): Roles → Role_Permissions → Permissions
+
+Authorization is driven entirely by the spreadsheet. There is deliberately no
+in-code "Admin allows everything" rule and no hidden mapping table — if a role
+has no active `Role_Permissions` rows, it has no permissions, including Admin.
+
+Flow: `Users.Role` (role name) → `Roles` → `Role_Permissions` → `Permissions`.
+
+### Role_Permissions schema
+
+| Column | Meaning |
+| --- | --- |
+| `Role_Permission_ID` | server-generated row id (`RP-…`) |
+| `Role_ID` | the role being granted (joins `Roles.Role_ID`) |
+| `Permission_ID` | the granted permission (joins `Permissions.Permission_ID`) |
+| `Status` | `Active` grants; anything else (e.g. `Inactive`) grants nothing |
+
+`Roles` and `Permissions` keep their existing schemas — nothing is renamed.
+The reader adapts to their actual columns: the role-name column is detected
+as `Role_Name`, `Role` or `Name`; the permission-code column as
+`Permission_Name`, `Permission`, `Permission_Code`, `Code` or `Name`. A
+missing `Role_ID` / `Permission_ID` column is tolerated (the name itself then
+serves as the join key), so no sheet restructuring is required.
+
+### Canonical permission catalog
+
+`CONFIG.PERMISSION_CODES` holds every permission name (34 today). `STUDENTS.*`
+and `STAFF.*` are enforced by Phase 3 routes now; `SCHOOL_FEES.*`,
+`FEEDING_FEES.*`, `STATIONERY.*`, `INVENTORY.*`, `SALARIES.*`,
+`AUDIT_LOG.READ`, `DELEGATIONS.*` and `DASHBOARD.READ` are reserved so the
+catalog does not change when later phases land.
+
+### Setup / seed
+
+`setupRolePermissions()` — run once from the Apps Script editor
+(Run ▸ setupRolePermissions), NOT an API action. It is idempotent, runs under
+the script lock, and:
+
+1. creates the `Role_Permissions` tab with the four columns if absent;
+2. adds a `Permissions` row for every catalog code that is missing
+   (matched by name);
+3. maps the `Admin` role (matched by name, then by `Role_ID`) to every
+   catalog code with `Status = Active`;
+4. grants NOTHING to any other role — deny-by-default. Granting
+   Teacher/Accountant/etc. is a deliberate later decision made by editing
+   the `Role_Permissions` sheet.
+
+If `Roles` or `Permissions` is missing or unreadable it fails with
+`SERVER_ERROR` instead of guessing. Everything it writes is visible in the
+sheet — there are no hidden mappings.
+
+### Fail-safe behavior
+
+- missing `Roles` / `Permissions` / `Role_Permissions` → `SERVER_ERROR`
+  (nothing is silently allowed);
+- a mapping row whose `Permission_ID` has no `Permissions` row →
+  `SERVER_ERROR` (`orphan-mapping`);
+- duplicate `(Role_ID, Permission_ID)` rows with the same effective status
+  de-duplicate; conflicting statuses (`Active` vs `Inactive`) → `CONFLICT`;
+- unauthenticated → `UNAUTHORIZED`; inactive user → `UNAUTHORIZED`;
+  authenticated without the permission (or unknown permission) → `FORBIDDEN`.
+
+### Current role assumptions
+
+- `Users.Role` holds a role NAME (e.g. `Admin` for `USR-001`,
+  `mr.mensahgibson@gmail.com`). Role lookup matches the name
+  case-insensitively, falling back to `Role_ID`.
+- Only `Admin` is seeded. No Teacher/Finance roles are invented; if the live
+  `Roles` sheet already contains other roles they simply have no grants
+  until someone maps them deliberately.
+- The live `Roles`/`Permissions` column layouts could not be read from this
+  machine (the repo syncs code, not sheet data); the column detection above
+  is what makes adapting safe. Verify the tabs after running the seed.
 
 ## API shape (action-based, not REST)
 
@@ -72,8 +149,8 @@ contract: `payload.success`, `payload.message`, `payload.data`, `payload.error`,
 
 ## Sheet tabs referenced by `Config.js`
 
-`Students`, `Staff`, `Users`, `Roles`, `Permissions`, `School_Fees`,
-`Feeding_Fees`, `Stationery`, `Inventory`, `Inventory_Movements`,
+`Students`, `Staff`, `Users`, `Roles`, `Permissions`, `Role_Permissions`,
+`School_Fees`, `Feeding_Fees`, `Stationery`, `Inventory`, `Inventory_Movements`,
 `Salary_Payments`, `Delegations`, `Audit_Log`
 
 Only `Config.js` is asserted here; the tabs themselves are not created by this repo.
@@ -111,7 +188,7 @@ clasp push               # .clasp.json supplies the scriptId
 No test framework is used. There are two zero-dependency Node scripts:
 
 ```bash
-node tests/backend.test.js      # 146 tests: config, utils, response, router, health, auth, students, staff
+node tests/backend.test.js      # 161 tests: config, utils, response, router, health, auth, students, staff, role_permissions
 node tests/claspignore.test.js  # 9 tests: proves frontend/ can never be pushed
 ```
 
@@ -156,8 +233,10 @@ backend files, so nothing in `frontend/`, `tests/`, `docs/` or any
    only — the router returns `NOT_FOUND` for all of them.
 5. **`CONFIG.PAYMENT_METHOD` values are an assumption** and need confirming with
    the school.
-6. **No `Role_Permissions` mapping sheet exists yet.** `Roles` and `Permissions`
-   share no key, so role→permission resolution cannot read from the sheet.
-   `Permissions.js` therefore still uses its temporary Admin-only map
-   (`TEMP_ROLE_PERMISSIONS_`); replace it with a sheet read before granting
-   real permissions to teacher/accountant roles (needed by Phase 4 and later).
+6. **The Role_Permissions seed has not been run on the live spreadsheet yet.**
+   After the next `clasp push`, run `setupRolePermissions()` once from the
+   Apps Script editor. Until then, permission-checked routes (students.*,
+   staff.*) return `SERVER_ERROR` because the `Role_Permissions` sheet is
+   missing; `health`, `auth.me` and `auth.check` without a permission
+   argument are unaffected. Deployment order: push → run the seed → verify
+   with `auth.check` (`permission: "STUDENTS.READ"`).

@@ -151,6 +151,11 @@ function makeSpreadsheet(name, sheets) {
         })[0] || null
       );
     },
+    insertSheet: function (tabName) {
+      const created = makeSheet(tabName, []);
+      sheets.push(created);
+      return created;
+    },
   };
 }
 
@@ -316,7 +321,9 @@ function loadBackend(sandbox) {
     ' readAllStaff_: (typeof readAllStaff_ !== "undefined" ? readAllStaff_ : undefined),' +
     ' findStaffById_: (typeof findStaffById_ !== "undefined" ? findStaffById_ : undefined),' +
     ' recordToValues_: (typeof recordToValues_ !== "undefined" ? recordToValues_ : undefined),' +
-    ' withScriptLock_: (typeof withScriptLock_ !== "undefined" ? withScriptLock_ : undefined)' +
+    ' withScriptLock_: (typeof withScriptLock_ !== "undefined" ? withScriptLock_ : undefined),' +
+    ' hasPermission_: (typeof hasPermission_ !== "undefined" ? hasPermission_ : undefined),' +
+    ' setupRolePermissions: (typeof setupRolePermissions !== "undefined" ? setupRolePermissions : undefined)' +
     ' };';
 
   vm.runInContext(source + exporter, context, { filename: 'backend-bundle.js' });
@@ -335,6 +342,7 @@ const EXPECTED_TABS = [
   'Users',
   'Roles',
   'Permissions',
+  'Role_Permissions',
   'School_Fees',
   'Feeding_Fees',
   'Stationery',
@@ -344,6 +352,55 @@ const EXPECTED_TABS = [
   'Delegations',
   'Audit_Log',
 ];
+
+/* ==========================================================================
+ * Phase 4A: Role_Permissions fixtures
+ * ======================================================================== */
+
+// Mirrors CONFIG.PERMISSION_CODES; asserted equal in the Phase 4A section.
+const P4A_PERMISSION_CODES = [
+  'STUDENTS.READ', 'STUDENTS.CREATE', 'STUDENTS.UPDATE', 'STUDENTS.WITHDRAW',
+  'STAFF.READ', 'STAFF.CREATE', 'STAFF.UPDATE', 'STAFF.DEACTIVATE',
+  'SCHOOL_FEES.READ', 'SCHOOL_FEES.CREATE', 'SCHOOL_FEES.UPDATE', 'SCHOOL_FEES.VOID',
+  'FEEDING_FEES.READ', 'FEEDING_FEES.CREATE', 'FEEDING_FEES.UPDATE', 'FEEDING_FEES.VOID',
+  'STATIONERY.READ', 'STATIONERY.CREATE', 'STATIONERY.UPDATE', 'STATIONERY.VOID',
+  'INVENTORY.READ', 'INVENTORY.CREATE', 'INVENTORY.UPDATE', 'INVENTORY.ADJUST',
+  'SALARIES.READ', 'SALARIES.CREATE', 'SALARIES.UPDATE', 'SALARIES.VOID',
+  'AUDIT_LOG.READ',
+  'DELEGATIONS.READ', 'DELEGATIONS.CREATE', 'DELEGATIONS.UPDATE', 'DELEGATIONS.REVOKE',
+  'DASHBOARD.READ'
+];
+
+/** Permissions rows: PERM-1..PERM-N in canonical order, all Active. */
+function p4aPermissionRows() {
+  return P4A_PERMISSION_CODES.map(function (code, index) {
+    return ['PERM-' + (index + 1), code, 'Active'];
+  });
+}
+
+/** Admin mapping rows: ROL-1 -> every PERM-n with Status Active. */
+function p4aAdminMappingRows() {
+  return P4A_PERMISSION_CODES.map(function (code, index) {
+    return ['RP-' + (index + 1), 'ROL-1', 'PERM-' + (index + 1), 'Active'];
+  });
+}
+
+/**
+ * Roles / Permissions / Role_Permissions sheets with Admin fully mapped.
+ * opts.roles / opts.permissions / opts.mappings override the row bodies
+ * (opts.mappings === [] gives a header-only mapping sheet).
+ */
+function p4aPermissionSheets(opts) {
+  opts = opts || {};
+  return {
+    roles: makeSheet('Roles', [['Role_ID', 'Role_Name', 'Status']]
+      .concat(opts.roles || [['ROL-1', 'Admin', 'Active'], ['ROL-2', 'Teacher', 'Active']])),
+    permissions: makeSheet('Permissions', [['Permission_ID', 'Permission_Name', 'Status']]
+      .concat(opts.permissions || p4aPermissionRows())),
+    rolePermissions: makeSheet('Role_Permissions', [['Role_Permission_ID', 'Role_ID', 'Permission_ID', 'Status']]
+      .concat(opts.mappings !== undefined ? opts.mappings : p4aAdminMappingRows())),
+  };
+}
 
 /** A spreadsheet containing every expected tab, plus data rows for tests. */
 function makeFullSpreadsheet() {
@@ -366,6 +423,12 @@ function makeFullSpreadsheet() {
     ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', ''],
     ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', ''],
   ];
+  // Phase 4A: real Roles / Permissions / Role_Permissions so authorization
+  // resolves through the mapping (Admin fully granted, Teacher nothing).
+  const p4a = p4aPermissionSheets();
+  sheets[EXPECTED_TABS.indexOf('Roles')] = p4a.roles;
+  sheets[EXPECTED_TABS.indexOf('Permissions')] = p4a.permissions;
+  sheets[EXPECTED_TABS.indexOf('Role_Permissions')] = p4a.rolePermissions;
   return makeSpreadsheet('SchoolManagementSystem', sheets);
 }
 
@@ -375,7 +438,10 @@ function makeAuthSpreadsheet(rows) {
     ['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'].concat(rows || []),
   ]);
   if (rows) users._rows = [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login']].concat(rows);
-  return makeSpreadsheet('SchoolManagementSystem', [users]);
+  // Phase 4A: include the authorization tables so requirePermission_ resolves
+  // through Role_Permissions (Admin granted, others denied by default).
+  const p4a = p4aPermissionSheets();
+  return makeSpreadsheet('SchoolManagementSystem', [users, p4a.roles, p4a.permissions, p4a.rolePermissions]);
 }
 
 /** Load the backend with a signed-in Google identity. */
@@ -455,7 +521,7 @@ check('SHEET_ID matches the real container spreadsheet', function () {
   ok(/^[A-Za-z0-9_-]{40,}$/.test(CONFIG.SHEET_ID), 'SHEET_ID does not look like a spreadsheet ID');
 });
 
-check('all 13 logical tabs are declared with the agreed names', function () {
+check('all 14 logical tabs are declared with the agreed names', function () {
   const actual = Object.keys(CONFIG.SHEETS).map(function (key) {
     return CONFIG.SHEETS[key];
   });
@@ -896,7 +962,7 @@ check('health reports missing tabs as a data issue without failing', function ()
 
   eq(envelope.success, true, 'missing tabs should not make the service unhealthy');
   eq(envelope.data.sheets, ['Students', 'Staff'], 'sheets must be the tabs that really exist');
-  eq(envelope.data.missingSheets.length, 11);
+  eq(envelope.data.missingSheets.length, 12);
   ok(envelope.data.missingSheets.indexOf('Audit_Log') !== -1, 'missingSheets should name the absent tabs');
 });
 
@@ -1139,7 +1205,7 @@ check('P2: permission format validated unknown denies', function () {
   ]));
   var admin = apiP.requireAuthentication_();
   eq(apiP.hasPermission_(admin, 'STUDENTS.READ'), true);
-  eq(apiP.hasPermission_(admin, 'NOPE.READ'), true);
+  eq(apiP.hasPermission_(admin, 'NOPE.READ'), false);
   eq(apiP.hasPermission_(admin, 'not-a-permission'), false);
   eq(apiP.hasPermission_(admin, ''), false);
   eq(apiP.hasPermission_(null, 'STUDENTS.READ'), false);
@@ -1147,7 +1213,7 @@ check('P2: permission format validated unknown denies', function () {
   apiP.assertValidPermissionFormat_('STUDENTS.READ');
 });
 
-check('P2: non-admin holds no permissions temporary map', function () {
+check('P2: non-admin holds no permissions (deny-by-default)', function () {
   var apiT = loadBackendAs('teacher@school.edu', makeAuthSpreadsheet([
     ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', '']
   ]));
@@ -1313,6 +1379,12 @@ function makePhase3Spreadsheet(opts) {
     ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', ''],
     ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', ''],
   ];
+  // Phase 4A: real authorization tables so admin/teacher routes resolve
+  // through Role_Permissions exactly as they will in production.
+  const p4a = p4aPermissionSheets();
+  sheets[EXPECTED_TABS.indexOf('Roles')] = p4a.roles;
+  sheets[EXPECTED_TABS.indexOf('Permissions')] = p4a.permissions;
+  sheets[EXPECTED_TABS.indexOf('Role_Permissions')] = p4a.rolePermissions;
   return makeSpreadsheet('SchoolManagementSystem', sheets);
 }
 
@@ -1563,10 +1635,12 @@ check('P3: students.list missing Students sheet is SERVER_ERROR', function () {
 });
 
 check('P3: students.list missing required columns is SERVER_ERROR', function () {
+  var p4a = p4aPermissionSheets();
   var ss = makeSpreadsheet('SchoolManagementSystem', [
     makeSheet('Students', [['Student_ID', 'First_Name']]),
     makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
       ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    p4a.roles, p4a.permissions, p4a.rolePermissions,
   ]);
   var apiS = loadBackendAs('admin@school.edu', ss);
   var envelope = doGetEnvelope(apiS, { action: 'students.list' });
@@ -1807,10 +1881,12 @@ check('P3: staff.list missing Staff sheet is SERVER_ERROR', function () {
 });
 
 check('P3: staff.list missing required columns is SERVER_ERROR', function () {
+  var p4a = p4aPermissionSheets();
   var ss = makeSpreadsheet('SchoolManagementSystem', [
     makeSheet('Staff', [['Staff_ID', 'First_Name']]),
     makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
       ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    p4a.roles, p4a.permissions, p4a.rolePermissions,
   ]);
   var apiS = loadBackendAs('admin@school.edu', ss);
   var envelope = doGetEnvelope(apiS, { action: 'staff.list' });
@@ -1825,6 +1901,222 @@ check('P3: staff.create respects script locking on write', function () {
   var envelope = doPostEnvelope(apiLocked, 'staff.create', p3StaffPayload());
   eq(envelope.success, false);
   eq(envelope.error, ERROR_CODES.CONFLICT);
+});
+
+section('Phase 4A: Role_Permissions authorization');
+
+check('P4A: test catalog matches CONFIG.PERMISSION_CODES', function () {
+  eq(P4A_PERMISSION_CODES, api.__api.CONFIG.PERMISSION_CODES);
+});
+
+check('P4A: admin receives permissions through Role_Permissions', function () {
+  var apiA = loadBackendAs('admin@school.edu', makeFullSpreadsheet());
+  var grants = apiA.resolveRolePermissions_('Admin');
+  ok(grants.indexOf('STUDENTS.READ') !== -1, 'Admin must hold STUDENTS.READ via the mapping');
+  ok(grants.indexOf('SALARIES.READ') !== -1, 'reserved codes are granted through the mapping too');
+  eq(grants.length, P4A_PERMISSION_CODES.length);
+  var admin = apiA.requireAuthentication_();
+  eq(apiA.hasPermission_(admin, 'STAFF.DEACTIVATE'), true);
+  eq(apiA.requirePermission_('STUDENTS.READ').userId, 'USR-1');
+});
+
+check('P4A: role matching is case-insensitive', function () {
+  var apiA = loadBackendAs('admin@school.edu', makeFullSpreadsheet());
+  ok(apiA.resolveRolePermissions_('admin').length > 0, 'a lowercase role name must still resolve');
+});
+
+check('P4A: authenticated user without permission is FORBIDDEN', function () {
+  var apiT = loadBackendAs('teacher@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doGetEnvelope(apiT, { action: 'students.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.FORBIDDEN);
+  eq(envelope.details.permission, 'STUDENTS.READ');
+});
+
+check('P4A: unknown permission is denied', function () {
+  var apiA = loadBackendAs('admin@school.edu', makeFullSpreadsheet());
+  var admin = apiA.requireAuthentication_();
+  eq(apiA.hasPermission_(admin, 'NOPE.READ'), false);
+  var err = throwsWithCode(function () { apiA.requirePermission_('NOPE.READ'); }, ERROR_CODES.FORBIDDEN);
+  eq(err.details.permission, 'NOPE.READ');
+});
+
+check('P4A: inactive user is denied before permissions are checked', function () {
+  var apiI = loadBackendAs('old@school.edu', makeAuthSpreadsheet([
+    ['USR-9', 'STF-9', 'old@school.edu', 'Admin', 'Inactive', '']
+  ]));
+  var res = apiI.getCurrentUser_();
+  eq(res.user, null);
+  eq(res.error.code, ERROR_CODES.UNAUTHORIZED);
+});
+
+section('Phase 4A: Role_Permissions fail-safe behavior');
+
+check('P4A: missing Role_Permissions sheet fails safely', function () {
+  var ss = makeSpreadsheet('NoMapping', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    makeSheet('Roles', [['Role_ID', 'Role_Name', 'Status'], ['ROL-1', 'Admin', 'Active']]),
+    makeSheet('Permissions', [['Permission_ID', 'Permission_Name', 'Status'],
+      ['PERM-1', 'STUDENTS.READ', 'Active']]),
+  ]);
+  var apiM = loadBackendAs('admin@school.edu', ss);
+  var err = throwsWithCode(function () { apiM.requirePermission_('STUDENTS.READ'); }, ERROR_CODES.SERVER_ERROR);
+  eq(err.details.reason, 'sheet-missing');
+  var envelope = doGetEnvelope(apiM, { action: 'students.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.SERVER_ERROR);
+});
+
+check('P4A: mapping to a missing permission fails safely', function () {
+  var p4a = p4aPermissionSheets({
+    mappings: [['RP-90', 'ROL-1', 'PERM-999', 'Active']],
+  });
+  var ss = makeSpreadsheet('Orphan', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    p4a.roles, p4a.permissions, p4a.rolePermissions,
+  ]);
+  var apiO = loadBackendAs('admin@school.edu', ss);
+  var err = throwsWithCode(function () { apiO.requirePermission_('STUDENTS.READ'); }, ERROR_CODES.SERVER_ERROR);
+  eq(err.details.reason, 'orphan-mapping');
+  ok(err.details.permissionIds.indexOf('PERM-999') !== -1, 'the orphan Permission_ID must be named');
+});
+
+check('P4A: a role with multiple permissions works', function () {
+  var p4a = p4aPermissionSheets({
+    roles: [['ROL-1', 'Admin', 'Active'], ['ROL-3', 'Accountant', 'Active']],
+    mappings: [
+      ['RP-1', 'ROL-3', 'PERM-1', 'Active'],
+      ['RP-2', 'ROL-3', 'PERM-9', 'Active'],
+      ['RP-3', 'ROL-3', 'PERM-29', 'Active'],
+    ],
+  });
+  var ss = makeSpreadsheet('Multi', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-3', 'STF-3', 'acct@school.edu', 'Accountant', 'Active', '']]),
+    p4a.roles, p4a.permissions, p4a.rolePermissions,
+  ]);
+  var apiR = loadBackendAs('acct@school.edu', ss);
+  var user = apiR.requireAuthentication_();
+  eq(apiR.hasPermission_(user, 'STUDENTS.READ'), true);
+  eq(apiR.hasPermission_(user, 'SCHOOL_FEES.READ'), true);
+  eq(apiR.hasPermission_(user, 'AUDIT_LOG.READ'), true);
+  eq(apiR.hasPermission_(user, 'STUDENTS.CREATE'), false, 'unmapped permission denies');
+});
+
+check('P4A: inactive permission assignment is denied', function () {
+  var p4a = p4aPermissionSheets({
+    mappings: [['RP-1', 'ROL-1', 'PERM-1', 'Inactive']],
+  });
+  var ss = makeSpreadsheet('Inactive', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    p4a.roles, p4a.permissions, p4a.rolePermissions,
+  ]);
+  var apiN = loadBackendAs('admin@school.edu', ss);
+  var user = apiN.requireAuthentication_();
+  eq(apiN.hasPermission_(user, 'STUDENTS.READ'), false);
+  throwsWithCode(function () { apiN.requirePermission_('STUDENTS.READ'); }, ERROR_CODES.FORBIDDEN);
+});
+
+section('Phase 4A: duplicate mappings, seed and auth routes');
+
+check('P4A: duplicate same-status mappings de-duplicate deterministically', function () {
+  var p4a = p4aPermissionSheets({
+    mappings: [
+      ['RP-1', 'ROL-1', 'PERM-1', 'Active'],
+      ['RP-2', 'ROL-1', 'PERM-1', 'Active'],
+    ],
+  });
+  var ss = makeSpreadsheet('Dupes', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    p4a.roles, p4a.permissions, p4a.rolePermissions,
+  ]);
+  var apiD = loadBackendAs('admin@school.edu', ss);
+  var user = apiD.requireAuthentication_();
+  eq(apiD.hasPermission_(user, 'STUDENTS.READ'), true, 'identical duplicates still grant');
+  var grants = apiD.resolveRolePermissions_('Admin');
+  eq(grants.filter(function (c) { return c === 'STUDENTS.READ'; }).length, 1, 'granted exactly once');
+  eq(grants.length, 1, 'nothing else leaks in');
+});
+
+check('P4A: duplicate mappings with conflicting statuses are CONFLICT', function () {
+  var p4a = p4aPermissionSheets({
+    mappings: [
+      ['RP-1', 'ROL-1', 'PERM-1', 'Active'],
+      ['RP-2', 'ROL-1', 'PERM-1', 'Inactive'],
+    ],
+  });
+  var ss = makeSpreadsheet('Conflict', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    p4a.roles, p4a.permissions, p4a.rolePermissions,
+  ]);
+  var apiC = loadBackendAs('admin@school.edu', ss);
+  var err = throwsWithCode(function () { apiC.requirePermission_('STUDENTS.READ'); }, ERROR_CODES.CONFLICT);
+  ok(err.details.permissionIds.indexOf('PERM-1') !== -1, 'the conflicting Permission_ID must be named');
+});
+
+check('P4A: setupRolePermissions creates and seeds the mapping idempotently', function () {
+  var roles = makeSheet('Roles', [['Role_ID', 'Role_Name', 'Status'], ['ROL-1', 'Admin', 'Active']]);
+  var permissions = makeSheet('Permissions', [['Permission_ID', 'Permission_Name', 'Status']]);
+  var users = makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]);
+  var ss = makeSpreadsheet('Seed', [users, roles, permissions]);
+  // A counter-based uuid keeps every generated Permission_ID unique (a
+  // constant uuid would collapse the Permissions index to a single id).
+  var uuidCounter = 0;
+  var apiS = loadBackendAs('admin@school.edu', ss, {
+    uuid: function () {
+      uuidCounter += 1;
+      var hex = uuidCounter.toString(16);
+      // Zero-pad in FRONT: generateId_ uses the FIRST 12 hex characters, so
+      // the varying digits must lead for every id to be unique.
+      while (hex.length < 12) hex = '0' + hex;
+      while (hex.length < 32) hex = hex + '0';
+      return hex;
+    },
+  });
+  var first = apiS.setupRolePermissions();
+  eq(first.rolePermissionsSheetCreated, true);
+  eq(first.permissionsAdded.length, P4A_PERMISSION_CODES.length);
+  eq(first.mappingsCreated.length, P4A_PERMISSION_CODES.length);
+  eq(ss.getSheetByName('Role_Permissions').getLastRow(), 1 + P4A_PERMISSION_CODES.length);
+  var second = apiS.setupRolePermissions();
+  eq(second.rolePermissionsSheetCreated, false);
+  eq(second.permissionsAdded.length, 0);
+  eq(second.mappingsCreated.length, 0);
+  eq(second.mappingsAlreadyPresent, P4A_PERMISSION_CODES.length);
+  eq(apiS.resolveRolePermissions_('Admin').length, P4A_PERMISSION_CODES.length);
+});
+
+check('P4A: auth.me still works with mapping-driven authorization', function () {
+  var apiM = loadBackendAs('admin@school.edu', makeFullSpreadsheet());
+  var env = JSON.parse(apiM.doGet({ parameter: { action: 'auth.me' } }).getContent());
+  eq(env.success, true);
+  eq(env.data, { userId: 'USR-1', staffId: 'STF-1', email: 'admin@school.edu', role: 'Admin' });
+});
+
+check('P4A: auth.check resolves allowed and denied through the mapping', function () {
+  var p4a = p4aPermissionSheets({
+    mappings: p4aAdminMappingRows().concat([['RP-99', 'ROL-2', 'PERM-1', 'Active']]),
+  });
+  var ss = makeSpreadsheet('Check', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', '']]),
+    p4a.roles, p4a.permissions, p4a.rolePermissions,
+  ]);
+  var apiC = loadBackendAs('teacher@school.edu', ss);
+  var allowed = JSON.parse(apiC.doPost({ parameter: {},
+    postData: { contents: JSON.stringify({ action: 'auth.check', payload: { permission: 'STUDENTS.READ' } }) } }).getContent());
+  eq(allowed.success, true);
+  eq(allowed.data.allowed, true);
+  var denied = JSON.parse(apiC.doPost({ parameter: {},
+    postData: { contents: JSON.stringify({ action: 'auth.check', payload: { permission: 'STAFF.READ' } }) } }).getContent());
+  eq(denied.success, true);
+  eq(denied.data.allowed, false);
 });
 
 section('Phase boundary (no fake implementations)');

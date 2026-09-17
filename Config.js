@@ -34,6 +34,7 @@ const CONFIG = {
     USERS: 'Users',
     ROLES: 'Roles',
     PERMISSIONS: 'Permissions',
+    ROLE_PERMISSIONS: 'Role_Permissions',
     SCHOOL_FEES: 'School_Fees',
     FEEDING_FEES: 'Feeding_Fees',
     STATIONERY: 'Stationery',
@@ -213,6 +214,28 @@ const CONFIG = {
     }
   }
 };
+
+/**
+ * Canonical permission catalog (Phase 4A). Format: MODULE.ACTION in
+ * UPPER_SNAKE form. These are the permission NAMES the Permissions sheet
+ * stores and Role_Permissions grants to roles.
+ *
+ * STUDENTS.* and STAFF.* are enforced by Phase 3 routes today. The rest are
+ * RESERVED so the catalog does not have to change when later phases land;
+ * they appear in the Permissions sheet but no route requires them yet.
+ */
+CONFIG.PERMISSION_CODES = [
+  'STUDENTS.READ', 'STUDENTS.CREATE', 'STUDENTS.UPDATE', 'STUDENTS.WITHDRAW',
+  'STAFF.READ', 'STAFF.CREATE', 'STAFF.UPDATE', 'STAFF.DEACTIVATE',
+  'SCHOOL_FEES.READ', 'SCHOOL_FEES.CREATE', 'SCHOOL_FEES.UPDATE', 'SCHOOL_FEES.VOID',
+  'FEEDING_FEES.READ', 'FEEDING_FEES.CREATE', 'FEEDING_FEES.UPDATE', 'FEEDING_FEES.VOID',
+  'STATIONERY.READ', 'STATIONERY.CREATE', 'STATIONERY.UPDATE', 'STATIONERY.VOID',
+  'INVENTORY.READ', 'INVENTORY.CREATE', 'INVENTORY.UPDATE', 'INVENTORY.ADJUST',
+  'SALARIES.READ', 'SALARIES.CREATE', 'SALARIES.UPDATE', 'SALARIES.VOID',
+  'AUDIT_LOG.READ',
+  'DELEGATIONS.READ', 'DELEGATIONS.CREATE', 'DELEGATIONS.UPDATE', 'DELEGATIONS.REVOKE',
+  'DASHBOARD.READ'
+];
 
 /**
  * Derived allow-lists used by enum validation (see assertOneOf_ in Utils.js).
