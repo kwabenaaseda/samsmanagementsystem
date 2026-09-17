@@ -323,6 +323,8 @@ function loadBackend(sandbox) {
     ' recordToValues_: (typeof recordToValues_ !== "undefined" ? recordToValues_ : undefined),' +
     ' withScriptLock_: (typeof withScriptLock_ !== "undefined" ? withScriptLock_ : undefined),' +
     ' hasPermission_: (typeof hasPermission_ !== "undefined" ? hasPermission_ : undefined),' +
+    ' toPermissionCode_: (typeof toPermissionCode_ !== "undefined" ? toPermissionCode_ : undefined),' +
+    ' getPermissionsIndex_: (typeof getPermissionsIndex_ !== "undefined" ? getPermissionsIndex_ : undefined),' +
     ' setupRolePermissions: (typeof setupRolePermissions !== "undefined" ? setupRolePermissions : undefined)' +
     ' };';
 
@@ -371,10 +373,30 @@ const P4A_PERMISSION_CODES = [
   'DASHBOARD.READ'
 ];
 
-/** Permissions rows: PERM-1..PERM-N in canonical order, all Active. */
+/** Permissions rows in the CONFIRMED live schema (Permission_ID, Module, Action, Description). */
+const P4A_MODULE_DISPLAY = {
+  STUDENTS: 'Students',
+  STAFF: 'Staff',
+  SCHOOL_FEES: 'School_Fees',
+  FEEDING_FEES: 'Feeding_Fees',
+  STATIONERY: 'Stationery',
+  INVENTORY: 'Inventory',
+  SALARIES: 'Salaries',
+  AUDIT_LOG: 'Audit_Log',
+  DELEGATIONS: 'Delegations',
+  DASHBOARD: 'Dashboard',
+};
+
+/** Permissions rows: PERM-1..PERM-N in canonical order, Module + Action columns. */
 function p4aPermissionRows() {
   return P4A_PERMISSION_CODES.map(function (code, index) {
-    return ['PERM-' + (index + 1), code, 'Active'];
+    var dot = code.indexOf('.');
+    return [
+      'PERM-' + (index + 1),
+      P4A_MODULE_DISPLAY[code.slice(0, dot)],
+      code.slice(dot + 1),
+      'Permission ' + code,
+    ];
   });
 }
 
@@ -393,9 +415,12 @@ function p4aAdminMappingRows() {
 function p4aPermissionSheets(opts) {
   opts = opts || {};
   return {
-    roles: makeSheet('Roles', [['Role_ID', 'Role_Name', 'Status']]
-      .concat(opts.roles || [['ROL-1', 'Admin', 'Active'], ['ROL-2', 'Teacher', 'Active']])),
-    permissions: makeSheet('Permissions', [['Permission_ID', 'Permission_Name', 'Status']]
+    roles: makeSheet('Roles', [['Role_ID', 'Role_Name', 'Description', 'Status']]
+      .concat(opts.roles || [
+        ['ROL-1', 'Admin', 'Full system administrator', 'Active'],
+        ['ROL-2', 'Teacher', 'Teaching staff', 'Active'],
+      ])),
+    permissions: makeSheet('Permissions', [['Permission_ID', 'Module', 'Action', 'Description']]
       .concat(opts.permissions || p4aPermissionRows())),
     rolePermissions: makeSheet('Role_Permissions', [['Role_Permission_ID', 'Role_ID', 'Permission_ID', 'Status']]
       .concat(opts.mappings !== undefined ? opts.mappings : p4aAdminMappingRows())),
@@ -1909,6 +1934,39 @@ check('P4A: test catalog matches CONFIG.PERMISSION_CODES', function () {
   eq(P4A_PERMISSION_CODES, api.__api.CONFIG.PERMISSION_CODES);
 });
 
+check('P4A: permission codes derive from Module + Action', function () {
+  eq(api.toPermissionCode_('Students', 'READ'), 'STUDENTS.READ');
+  eq(api.toPermissionCode_('Students', 'CREATE'), 'STUDENTS.CREATE');
+  eq(api.toPermissionCode_('Staff', 'UPDATE'), 'STAFF.UPDATE');
+  eq(api.toPermissionCode_('School_Fees', 'create'), 'SCHOOL_FEES.CREATE');
+  eq(api.toPermissionCode_('school fees', 'READ'), 'SCHOOL_FEES.READ');
+  eq(api.toPermissionCode_('', 'READ'), '');
+});
+
+check('P4A: permissions index uses the confirmed four-column schema', function () {
+  var apiA = loadBackendAs('admin@school.edu', makeFullSpreadsheet());
+  var index = apiA.getPermissionsIndex_();
+  eq(index.codes.length, P4A_PERMISSION_CODES.length);
+  eq(index.idByCode['STUDENTS.READ'], 'PERM-1', 'PERM-1 must map to the derived STUDENTS.READ');
+  eq(index.byId['perm-1'], 'STUDENTS.READ', 'Permission_ID joins are case-insensitive');
+  eq(apiA.hasPermission_(apiA.requireAuthentication_(), 'STUDENTS.READ'), true,
+    'Admin must hold the code derived from Module + Action');
+});
+
+check('P4A: Permissions sheet missing Module/Action fails safely', function () {
+  var p4a = p4aPermissionSheets();
+  var bad = makeSheet('Permissions', [['Permission_ID', 'Description'], ['PERM-1', 'legacy']]);
+  var ss = makeSpreadsheet('BadPerms', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    p4a.roles, bad, p4a.rolePermissions,
+  ]);
+  var apiB = loadBackendAs('admin@school.edu', ss);
+  var err = throwsWithCode(function () { apiB.requirePermission_('STUDENTS.READ'); }, ERROR_CODES.SERVER_ERROR);
+  ok(err.details.missingColumns.indexOf('Module') !== -1, 'must name the missing Module column');
+  ok(err.details.missingColumns.indexOf('Action') !== -1, 'must name the missing Action column');
+});
+
 check('P4A: admin receives permissions through Role_Permissions', function () {
   var apiA = loadBackendAs('admin@school.edu', makeFullSpreadsheet());
   var grants = apiA.resolveRolePermissions_('Admin');
@@ -1923,6 +1981,14 @@ check('P4A: admin receives permissions through Role_Permissions', function () {
 check('P4A: role matching is case-insensitive', function () {
   var apiA = loadBackendAs('admin@school.edu', makeFullSpreadsheet());
   ok(apiA.resolveRolePermissions_('admin').length > 0, 'a lowercase role name must still resolve');
+});
+
+check('P4A: the confirmed Roles schema (Role_ID, Role_Name, Description, Status) is read correctly', function () {
+  var apiA = loadBackendAs('admin@school.edu', makeFullSpreadsheet());
+  eq(apiA.resolveRolePermissions_('Admin').length, P4A_PERMISSION_CODES.length,
+    'Admin must resolve with Description present and Status last');
+  eq(apiA.resolveRolePermissions_('Teacher'), [], 'roles without mapping rows deny');
+  eq(apiA.resolveRolePermissions_('NoSuchRole'), [], 'unknown roles deny');
 });
 
 check('P4A: authenticated user without permission is FORBIDDEN', function () {
@@ -1956,9 +2022,10 @@ check('P4A: missing Role_Permissions sheet fails safely', function () {
   var ss = makeSpreadsheet('NoMapping', [
     makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
       ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
-    makeSheet('Roles', [['Role_ID', 'Role_Name', 'Status'], ['ROL-1', 'Admin', 'Active']]),
-    makeSheet('Permissions', [['Permission_ID', 'Permission_Name', 'Status'],
-      ['PERM-1', 'STUDENTS.READ', 'Active']]),
+    makeSheet('Roles', [['Role_ID', 'Role_Name', 'Description', 'Status'],
+      ['ROL-1', 'Admin', 'Full system administrator', 'Active']]),
+    makeSheet('Permissions', [['Permission_ID', 'Module', 'Action', 'Description'],
+      ['PERM-1', 'Students', 'READ', 'Permission STUDENTS.READ']]),
   ]);
   var apiM = loadBackendAs('admin@school.edu', ss);
   var err = throwsWithCode(function () { apiM.requirePermission_('STUDENTS.READ'); }, ERROR_CODES.SERVER_ERROR);
@@ -1985,7 +2052,8 @@ check('P4A: mapping to a missing permission fails safely', function () {
 
 check('P4A: a role with multiple permissions works', function () {
   var p4a = p4aPermissionSheets({
-    roles: [['ROL-1', 'Admin', 'Active'], ['ROL-3', 'Accountant', 'Active']],
+    roles: [['ROL-1', 'Admin', 'Full system administrator', 'Active'],
+      ['ROL-3', 'Accountant', 'Finance and accounting', 'Active']],
     mappings: [
       ['RP-1', 'ROL-3', 'PERM-1', 'Active'],
       ['RP-2', 'ROL-3', 'PERM-9', 'Active'],
@@ -2060,8 +2128,9 @@ check('P4A: duplicate mappings with conflicting statuses are CONFLICT', function
 });
 
 check('P4A: setupRolePermissions creates and seeds the mapping idempotently', function () {
-  var roles = makeSheet('Roles', [['Role_ID', 'Role_Name', 'Status'], ['ROL-1', 'Admin', 'Active']]);
-  var permissions = makeSheet('Permissions', [['Permission_ID', 'Permission_Name', 'Status']]);
+  var roles = makeSheet('Roles', [['Role_ID', 'Role_Name', 'Description', 'Status'],
+    ['ROL-1', 'Admin', 'Full system administrator', 'Active']]);
+  var permissions = makeSheet('Permissions', [['Permission_ID', 'Module', 'Action', 'Description']]);
   var users = makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
     ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]);
   var ss = makeSpreadsheet('Seed', [users, roles, permissions]);
@@ -2084,6 +2153,19 @@ check('P4A: setupRolePermissions creates and seeds the mapping idempotently', fu
   eq(first.permissionsAdded.length, P4A_PERMISSION_CODES.length);
   eq(first.mappingsCreated.length, P4A_PERMISSION_CODES.length);
   eq(ss.getSheetByName('Role_Permissions').getLastRow(), 1 + P4A_PERMISSION_CODES.length);
+  // Permissions rows must use the confirmed schema: Module + Action, no
+  // permission-name column, Description filled, Title-Case Module.
+  var permsSheet = ss.getSheetByName('Permissions');
+  eq(permsSheet._rows[0], ['Permission_ID', 'Module', 'Action', 'Description'],
+    'the seed must not create a Permission_Name column');
+  eq(permsSheet.getLastRow(), 1 + P4A_PERMISSION_CODES.length);
+  var seededIndex = apiS.getPermissionsIndex_();
+  eq(seededIndex.codes.length, P4A_PERMISSION_CODES.length);
+  var studentsReadId = seededIndex.idByCode['STUDENTS.READ'];
+  ok(studentsReadId, 'STUDENTS.READ must resolve to a seeded Permission_ID');
+  var seededRow = permsSheet._rows.filter(function (r) { return r[0] === studentsReadId; })[0];
+  eq(seededRow[1], 'Students');
+  eq(seededRow[2], 'READ');
   var second = apiS.setupRolePermissions();
   eq(second.rolePermissionsSheetCreated, false);
   eq(second.permissionsAdded.length, 0);

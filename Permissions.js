@@ -14,14 +14,18 @@
  * in-code mapping table. If a role has no active Role_Permissions rows, it
  * has no permissions -- including Admin.
  *
- * SCHEMA (preferred, created by setupRolePermissions()):
+ * SCHEMA:
  *   Role_Permissions: Role_Permission_ID, Role_ID, Permission_ID, Status
- *   Roles / Permissions keep their existing schemas; the reader ADAPTS to
- *   their actual columns by detecting the role-name column
- *   (Role_Name | Role | Name) and the permission-code column
- *   (Permission_Name | Permission | Permission_Code | Code | Name). A
- *   missing Role_ID / Permission_ID column is tolerated: the role name /
- *   permission name itself is then used as the join key.
+ *     (created by setupRolePermissions()).
+ *   Permissions (CONFIRMED live schema): Permission_ID, Module, Action,
+ *     Description. There is NO permission-name column: the permission CODE
+ *     is DERIVED as Module + "." + Action, normalised to UPPER_SNAKE
+ *     (e.g. Module 'Students' + Action 'READ' -> 'STUDENTS.READ';
+ *     'School_Fees' + 'CREATE' -> 'SCHOOL_FEES.CREATE'). Permission_ID is
+ *     the record identifier used by Role_Permissions.Permission_ID.
+ *   Roles: the reader ADAPTS to its actual columns by detecting the
+ *     role-name column (Role_Name | Role | Name) and tolerates a missing
+ *     Role_ID column (the name then serves as the join key).
  *
  * FAIL-SAFE RULES (never silently allow):
  *   - Missing Roles / Permissions / Role_Permissions sheet -> SERVER_ERROR.
@@ -35,13 +39,43 @@
 
 var ROLE_PERMISSION_COLUMNS = ['Role_Permission_ID', 'Role_ID', 'Permission_ID', 'Status'];
 var ROLE_NAME_COLUMN_ALIASES = ['Role_Name', 'Role', 'Name'];
-var PERMISSION_CODE_COLUMN_ALIASES = ['Permission_Name', 'Permission', 'Permission_Code', 'Code', 'Name'];
+var PERMISSION_REQUIRED_COLUMNS = ['Permission_ID', 'Module', 'Action'];
 
 function assertValidPermissionFormat_(permission) {
   if (typeof permission !== 'string' || !/^[A-Z][A-Z0-9_]*\.[A-Z][A-Z0-9_]*$/.test(permission)) {
     throwError_('Permission must look like "MODULE.ACTION" (e.g. "STUDENTS.READ").',
       ERROR_CODES.VALIDATION_ERROR, { received: permission });
   }
+}
+
+/**
+ * Derive a permission CODE from the Permissions sheet's Module + Action
+ * columns, normalised to UPPER_SNAKE so 'School_Fees' + 'CREATE' yields
+ * 'SCHOOL_FEES.CREATE'. Returns '' when either part is blank.
+ * @param {string} moduleValue Raw Module cell value.
+ * @param {string} actionValue Raw Action cell value.
+ * @return {string} e.g. 'STUDENTS.READ'.
+ */
+function toPermissionCode_(moduleValue, actionValue) {
+  var moduleToken = toTrimmedString_(moduleValue).toUpperCase().replace(/[\s\-]+/g, '_');
+  var actionToken = toTrimmedString_(actionValue).toUpperCase().replace(/[\s\-]+/g, '_');
+  if (moduleToken === '' || actionToken === '') return '';
+  return moduleToken + '.' + actionToken;
+}
+
+/**
+ * Map an UPPER_SNAKE module token (e.g. 'SCHOOL_FEES') back to the Title
+ * Case value stored in CONFIG.MODULE ('School_Fees'), so rows written by
+ * the seed match the stored-value convention. Falls back to the token.
+ * @param {string} token UPPER_SNAKE module token.
+ * @return {string}
+ */
+function moduleDisplayFromToken_(token) {
+  var values = CONFIG.VALUES.MODULE;
+  for (var i = 0; i < values.length; i++) {
+    if (toPermissionCode_(values[i], 'X').split('.')[0] === token) return values[i];
+  }
+  return token;
 }
 
 /**
@@ -136,11 +170,15 @@ function readRolePermissionRows_() {
 }
 
 /**
- * Read the Permissions sheet into lookup maps. Joins by Permission_ID when
- * that column exists, otherwise by the permission code itself (schema
- * adaptation -- see the file header).
- * @return {{byId: Object<string,string>, byCode: Object<string,string>, idColumn: string|null, codeColumn: string, codes: string[]}}
- * @throws {Error} SERVER_ERROR when the sheet or its columns are unusable.
+ * Read the Permissions sheet into lookup maps. The code is DERIVED from the
+ * Module + Action columns (see toPermissionCode_); Permission_ID is the
+ * record identifier that Role_Permissions rows reference.
+ *
+ * Rows whose Module/Action are blank, or whose derived code is malformed,
+ * cannot grant anything and are skipped (default-deny), never error.
+ * @return {{byId: Object<string,string>, byCode: Object<string,string>, idByCode: Object<string,string>, codes: string[]}}
+ * @throws {Error} SERVER_ERROR when the sheet is missing or lacks the
+ *     confirmed columns.
  */
 function getPermissionsIndex_() {
   var sheetName = CONFIG.SHEETS.PERMISSIONS;
@@ -155,19 +193,12 @@ function getPermissionsIndex_() {
     throw err;
   }
   var headers = getHeaders_(sheet);
-  var codeColumn = null;
-  for (var i = 0; i < PERMISSION_CODE_COLUMN_ALIASES.length; i++) {
-    if (headers.indexOf(PERMISSION_CODE_COLUMN_ALIASES[i]) !== -1) {
-      codeColumn = PERMISSION_CODE_COLUMN_ALIASES[i];
-      break;
-    }
+  var missing = PERMISSION_REQUIRED_COLUMNS.filter(function (c) { return headers.indexOf(c) === -1; });
+  if (missing.length > 0) {
+    throwError_('Permissions sheet "' + sheetName + '" is missing column(s): ' + missing.join(', ') +
+      '. Permission codes are derived from Module + Action, so these columns are required.',
+      ERROR_CODES.SERVER_ERROR, { sheet: sheetName, missingColumns: missing, availableColumns: headers });
   }
-  if (!codeColumn) {
-    throwError_('Permissions sheet "' + sheetName + '" has no permission-name column (looked for: ' +
-      PERMISSION_CODE_COLUMN_ALIASES.join(', ') + ').',
-      ERROR_CODES.SERVER_ERROR, { sheet: sheetName, availableColumns: headers });
-  }
-  var idColumn = headers.indexOf('Permission_ID') !== -1 ? 'Permission_ID' : null;
   var lastRow = sheet.getLastRow();
   var byId = {};
   var byCode = {};
@@ -177,22 +208,19 @@ function getPermissionsIndex_() {
     for (var r = 1; r < values.length; r++) {
       if (isBlankRow_(values[r])) continue;
       var record = rowToObject_(headers, values[r]);
-      var code = toTrimmedString_(record[codeColumn]).toUpperCase();
-      if (code === '') continue;
+      var code = toPermissionCode_(record.Module, record.Action);
+      var id = toTrimmedString_(record.Permission_ID);
+      if (code === '' || id === '') continue; // unusable row: grants nothing
+      if (!/^[A-Z][A-Z0-9_]*\.[A-Z][A-Z0-9_]*$/.test(code)) continue;
       byCode[code] = code;
-      var id = idColumn ? toTrimmedString_(record[idColumn]) : code;
-      if (id !== '') {
-        byId[id.toLowerCase()] = code;
-        idByCode[code] = id;
-      }
+      byId[id.toLowerCase()] = code;
+      idByCode[code] = id;
     }
   }
   return {
     byId: byId,
     byCode: byCode,
     idByCode: idByCode,
-    idColumn: idColumn,
-    codeColumn: codeColumn,
     codes: Object.keys(byCode).sort()
   };
 }
@@ -300,8 +328,9 @@ function requirePermission_(permission) {
  *
  * What it does (idempotent -- safe to re-run):
  *   1. Creates the Role_Permissions tab with the canonical columns if absent.
- *   2. Adds a Permissions row for every code in CONFIG.PERMISSION_CODES that
- *      the Permissions sheet does not already have (matched by name).
+ *   2. Adds a Permissions row (Permission_ID, Module, Action, Description)
+ *      for every catalog code that is missing; codes derive from
+ *      Module + "." + Action downstream. No extra column is created.
  *   3. Maps the Admin role (matched by name in the Roles sheet, then by
  *      Role_ID) to EVERY permission code with Status 'Active'.
  *   4. Grants NOTHING to any other role -- deny-by-default. Granting
@@ -341,20 +370,23 @@ function setupRolePermissions() {
         ERROR_CODES.SERVER_ERROR, { sheet: CONFIG.SHEETS.ROLE_PERMISSIONS, missingColumns: missing });
     }
 
-    // 2. Ensure every canonical permission code has a Permissions row.
+    // 2. Ensure every canonical permission code has a Permissions row,
+    //    written in the CONFIRMED schema (Permission_ID, Module, Action,
+    //    Description). No permission-name column is created; the code is
+    //    derived downstream as Module + "." + Action.
     var permissions = getPermissionsIndex_();
     CONFIG.PERMISSION_CODES.forEach(function (code) {
       if (permissions.byCode[code.toUpperCase()]) {
         report.permissionsAlreadyPresent += 1;
         return;
       }
-      var record = {};
-      if (permissions.idColumn) record[permissions.idColumn] = generateId_('PERM');
-      record[permissions.codeColumn] = code;
-      if (getHeaders_(getSheet_(CONFIG.SHEETS.PERMISSIONS)).indexOf('Status') !== -1) {
-        record.Status = 'Active';
-      }
-      appendRow_(CONFIG.SHEETS.PERMISSIONS, record);
+      var dot = code.indexOf('.');
+      appendRow_(CONFIG.SHEETS.PERMISSIONS, {
+        Permission_ID: generateId_('PERM'),
+        Module: moduleDisplayFromToken_(code.slice(0, dot)),
+        Action: code.slice(dot + 1),
+        Description: 'Auto-created by setupRolePermissions() for ' + code + '.',
+      });
       report.permissionsAdded.push(code);
     });
 
@@ -377,8 +409,10 @@ function setupRolePermissions() {
     });
 
     permissions.codes.forEach(function (code) {
-      var permissionId = permissions.idColumn ? permissions.idByCode[code] : code;
-      if (!permissionId) return; // unreachable for rows indexed above
+      // Permission_ID is a required column of the confirmed schema, so the
+      // record identifier for a code always resolves.
+      var permissionId = permissions.idByCode[code];
+      if (!permissionId) return; // defensive: never write an unusable row
       if (existing[permissionId.toLowerCase()]) {
         report.mappingsAlreadyPresent += 1;
         return;

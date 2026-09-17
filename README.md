@@ -76,11 +76,17 @@ Flow: `Users.Role` (role name) → `Roles` → `Role_Permissions` → `Permissio
 | `Status` | `Active` grants; anything else (e.g. `Inactive`) grants nothing |
 
 `Roles` and `Permissions` keep their existing schemas — nothing is renamed.
-The reader adapts to their actual columns: the role-name column is detected
-as `Role_Name`, `Role` or `Name`; the permission-code column as
-`Permission_Name`, `Permission`, `Permission_Code`, `Code` or `Name`. A
-missing `Role_ID` / `Permission_ID` column is tolerated (the name itself then
-serves as the join key), so no sheet restructuring is required.
+The `Permissions` schema is **confirmed** as
+`Permission_ID | Module | Action | Description`; there is **no** permission
+name column. The permission CODE is derived as `Module + "." + Action`,
+normalised to UPPER_SNAKE (`Students` + `READ` → `STUDENTS.READ`;
+`School_Fees` + `CREATE` → `SCHOOL_FEES.CREATE`), and `Permission_ID` is the
+record identifier that `Role_Permissions.Permission_ID` references. The
+`Roles` sheet schema is also **confirmed** as
+`Role_ID | Role_Name | Description | Status`: the reader joins on
+`Role_ID` and matches roles by `Role_Name` (case-insensitively, with a
+`Role_ID` fallback); `Description` is ignored and `Status` is available for
+future role-level enable/disable without schema changes.
 
 ### Canonical permission catalog
 
@@ -97,8 +103,10 @@ catalog does not change when later phases land.
 the script lock, and:
 
 1. creates the `Role_Permissions` tab with the four columns if absent;
-2. adds a `Permissions` row for every catalog code that is missing
-   (matched by name);
+2. adds a `Permissions` row for every catalog code that is missing, written
+   in the confirmed schema (`Permission_ID`, `Module`, `Action`,
+   `Description`); codes are derived downstream as `Module + "." + Action`;
+   no extra column is created;
 3. maps the `Admin` role (matched by name, then by `Role_ID`) to every
    catalog code with `Status = Active`;
 4. grants NOTHING to any other role — deny-by-default. Granting
@@ -128,9 +136,12 @@ sheet — there are no hidden mappings.
 - Only `Admin` is seeded. No Teacher/Finance roles are invented; if the live
   `Roles` sheet already contains other roles they simply have no grants
   until someone maps them deliberately.
-- The live `Roles`/`Permissions` column layouts could not be read from this
-  machine (the repo syncs code, not sheet data); the column detection above
-  is what makes adapting safe. Verify the tabs after running the seed.
+- The live `Permissions` schema (`Permission_ID | Module | Action |
+  Description`) and the live `Roles` schema (`Role_ID | Role_Name |
+  Description | Status`) are both confirmed; the reader is built for them
+  and the test fixtures mirror them exactly. `Roles.Status` is not yet
+  enforced (role rows are trusted as maintained); a future enhancement can
+  deny roles whose `Status` is not `Active` without any schema change.
 
 ## API shape (action-based, not REST)
 
