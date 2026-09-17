@@ -90,6 +90,28 @@ const CONFIG = {
     INACTIVE: 'Inactive'
   },
 
+  /**
+   * Employment status for the Staff sheet. 'Inactive' is the value written by
+   * the staff.deactivate soft-delete; 'On Leave' and 'Terminated' are reserved
+   * for later phases.
+   */
+  STAFF_STATUS: {
+    ACTIVE: 'Active',
+    INACTIVE: 'Inactive',
+    ON_LEAVE: 'On Leave',
+    TERMINATED: 'Terminated'
+  },
+
+  /**
+   * Recurring salary payment cadence for the Staff sheet.
+   */
+  SALARY_FREQUENCY: {
+    MONTHLY: 'Monthly',
+    BIWEEKLY: 'Bi-weekly',
+    WEEKLY: 'Weekly',
+    ANNUAL: 'Annual'
+  },
+
   /** Academic terms used by School_Fees and Feeding_Fees. */
   TERM: {
     TERM_1: 'Term 1',
@@ -168,8 +190,10 @@ const CONFIG = {
     },
     STAFF: {
       LIST: 'staff.list',
+      GET: 'staff.get',
       CREATE: 'staff.create',
-      UPDATE: 'staff.update'
+      UPDATE: 'staff.update',
+      DEACTIVATE: 'staff.deactivate'
     },
     SALARIES: {
       LIST: 'salaries.list',
@@ -197,8 +221,10 @@ const CONFIG = {
  */
 CONFIG.VALUES = {
   STUDENT_STATUS: Object.values(CONFIG.STUDENT_STATUS),
+  STAFF_STATUS: Object.values(CONFIG.STAFF_STATUS),
   PAYMENT_METHOD: Object.values(CONFIG.PAYMENT_METHOD),
   PAYMENT_STATUS: Object.values(CONFIG.PAYMENT_STATUS),
   TERM: Object.values(CONFIG.TERM),
+  SALARY_FREQUENCY: Object.values(CONFIG.SALARY_FREQUENCY),
   MODULE: Object.values(CONFIG.MODULE)
 };

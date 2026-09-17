@@ -20,7 +20,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const BACKEND_FILES = ['Config.js', 'Response.js', 'Utils.js', 'Permissions.js', 'Auth.js', 'Router.js'];
+const BACKEND_FILES = ['Config.js', 'Response.js', 'Utils.js', 'Permissions.js', 'Auth.js', 'Router.js', 'Students.js', 'Staff.js'];
 
 /* ==========================================================================
  * Tiny assertion helpers (no framework)
@@ -306,7 +306,18 @@ function loadBackend(sandbox) {
     ' parseRequest_: (typeof parseRequest_ !== "undefined" ? parseRequest_ : undefined),' +
     ' listAvailableActions_: (typeof listAvailableActions_ !== "undefined" ? listAvailableActions_ : undefined),' +
     ' doGet: (typeof doGet !== "undefined" ? doGet : undefined),' +
-    ' doPost: (typeof doPost !== "undefined" ? doPost : undefined) };';
+    ' doPost: (typeof doPost !== "undefined" ? doPost : undefined),' +
+    ' getStudentsSheet_: (typeof getStudentsSheet_ !== "undefined" ? getStudentsSheet_ : undefined),' +
+    ' getStudentsHeaders_: (typeof getStudentsHeaders_ !== "undefined" ? getStudentsHeaders_ : undefined),' +
+    ' readAllStudents_: (typeof readAllStudents_ !== "undefined" ? readAllStudents_ : undefined),' +
+    ' findStudentById_: (typeof findStudentById_ !== "undefined" ? findStudentById_ : undefined),' +
+    ' getStaffSheet_: (typeof getStaffSheet_ !== "undefined" ? getStaffSheet_ : undefined),' +
+    ' getStaffHeaders_: (typeof getStaffHeaders_ !== "undefined" ? getStaffHeaders_ : undefined),' +
+    ' readAllStaff_: (typeof readAllStaff_ !== "undefined" ? readAllStaff_ : undefined),' +
+    ' findStaffById_: (typeof findStaffById_ !== "undefined" ? findStaffById_ : undefined),' +
+    ' recordToValues_: (typeof recordToValues_ !== "undefined" ? recordToValues_ : undefined),' +
+    ' withScriptLock_: (typeof withScriptLock_ !== "undefined" ? withScriptLock_ : undefined)' +
+    ' };';
 
   vm.runInContext(source + exporter, context, { filename: 'backend-bundle.js' });
   return sandbox;
@@ -471,8 +482,12 @@ check('VALUES are derived from, not duplicated alongside, the enums', function (
   }));
 });
 
-check('health and the two auth actions are routed', function () {
-  eq(api.listAvailableActions_().sort(), ['auth.check', 'auth.me', 'health']);
+check('health, auth and Phase 3 actions are routed', function () {
+  eq(api.listAvailableActions_().sort(), [
+    'auth.check', 'auth.me', 'health',
+    'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
+    'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
+  ]);
   eq(CONFIG.ACTIONS.HEALTH, 'health');
   eq(CONFIG.ACTIONS.AUTH.ME, 'auth.me');
   eq(CONFIG.ACTIONS.AUTH.CHECK, 'auth.check');
@@ -974,11 +989,15 @@ check('parseRequest_ requires payload to be an object', function () {
   eq(err.details.receivedType, 'array');
 });
 
-check('a missing action is rejected with all three routed actions', function () {
+check('a missing action is rejected with all routed actions', function () {
   const envelope = readEnvelope(api.doGet({ parameter: {} }));
   eq(envelope.success, false);
   eq(envelope.error, 'VALIDATION_ERROR');
-  eq(envelope.details.availableActions.sort(), ['auth.check', 'auth.me', 'health']);
+  eq(envelope.details.availableActions.sort(), [
+    'auth.check', 'auth.me', 'health',
+    'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
+    'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
+  ]);
 });
 
 check('an unknown action is NOT_FOUND and names what is available', function () {
@@ -986,7 +1005,11 @@ check('an unknown action is NOT_FOUND and names what is available', function () 
   eq(envelope.success, false);
   eq(envelope.error, 'NOT_FOUND');
   eq(envelope.details.action, 'does.notExist');
-  eq(envelope.details.availableActions.sort(), ['auth.check', 'auth.me', 'health']);
+  eq(envelope.details.availableActions.sort(), [
+    'auth.check', 'auth.me', 'health',
+    'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
+    'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
+  ]);
 });
 
 check('the router never throws: any input still yields a valid envelope', function () {
@@ -1239,14 +1262,575 @@ check('P2: duplicate active emails fail closed with CONFLICT', function () {
 });
 
 
+/* ==========================================================================
+ * Phase 3: Students and Staff
+ * ======================================================================== */
+
+// Canonical column schemas so the test sheets match the real tabs exactly.
+const P3_STUDENT_COLUMNS = [
+  'Student_ID', 'First_Name', 'Last_Name', 'Gender', 'Date_of_Birth',
+  'Class', 'Parent_Guardian', 'Guardian_Phone', 'Guardian_Email',
+  'Emergency_Contact_1_Name', 'Emergency_Contact_1_Phone',
+  'Emergency_Contact_1_Relationship',
+  'Emergency_Contact_2_Name', 'Emergency_Contact_2_Phone',
+  'Emergency_Contact_2_Relationship',
+  'Allergies', 'Illnesses_Medical_Conditions',
+  'Physical_Defects_Special_Conditions',
+  'Admission_Date', 'Status', 'Withdrawal_Date', 'Notes'
+];
+
+const P3_STAFF_COLUMNS = [
+  'Staff_ID', 'First_Name', 'Last_Name', 'Gender', 'Date_of_Birth',
+  'Phone', 'Email', 'Address', 'Position', 'Department',
+  'Employment_Date', 'Employment_Status', 'Salary_Amount', 'Salary_Frequency',
+  'Last_Salary_Paid_Date', 'Next_Salary_Due_Date', 'Salary_Status', 'Notes'
+];
+
+/** Build a full-width row from a partial record, blank-filling the rest. */
+function rowFor(columns, data) {
+  return columns.map(function (col) {
+    return data[col] !== undefined ? data[col] : '';
+  });
+}
+
+/**
+ * Spreadsheet with canonical Students + Staff + Users tabs, so the Phase 3
+ * handlers see exactly the schema the production sheets are expected to have.
+ * @param {Object} opts { studentRows, staffRows, usersRows } seed data.
+ */
+function makePhase3Spreadsheet(opts) {
+  opts = opts || {};
+  const sheets = EXPECTED_TABS.map(function (tabName) {
+    return makeSheet(tabName, [['Header_A', 'Header_B']]);
+  });
+  const studentsSheet = sheets[EXPECTED_TABS.indexOf('Students')];
+  studentsSheet._rows = [P3_STUDENT_COLUMNS.slice()].concat(opts.studentRows || []);
+  const staffSheet = sheets[EXPECTED_TABS.indexOf('Staff')];
+  staffSheet._rows = [P3_STAFF_COLUMNS.slice()].concat(opts.staffRows || []);
+  const usersSheet = sheets[EXPECTED_TABS.indexOf('Users')];
+  usersSheet._rows = opts.usersRows || [
+    ['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', ''],
+    ['USR-2', 'STF-2', 'teacher@school.edu', 'Teacher', 'Active', ''],
+  ];
+  return makeSpreadsheet('SchoolManagementSystem', sheets);
+}
+
+/** Helper: call doGet and return the parsed response envelope. */
+function doGetEnvelope(apiInstance, params) {
+  return JSON.parse(apiInstance.doGet({ parameter: params }).getContent());
+}
+
+/** Helper: call doPost with a JSON body and return the parsed response envelope. */
+function doPostEnvelope(apiInstance, action, payload) {
+  return JSON.parse(apiInstance.doPost({
+    parameter: {},
+    postData: { contents: JSON.stringify({ action: action, payload: payload }) },
+  }).getContent());
+}
+
+/** A valid students.create payload the field-validation tests start from. */
+function p3StudentPayload(overrides) {
+  return Object.assign({
+    First_Name: 'Ama',
+    Last_Name: 'Mensah',
+    Class: 'KG',
+    Admission_Date: '2025-01-15',
+    Parent_Guardian: 'Mr. Mensah',
+  }, overrides || {});
+}
+
+/** A valid staff.create payload the field-validation tests start from. */
+function p3StaffPayload(overrides) {
+  return Object.assign({
+    First_Name: 'Kwame',
+    Last_Name: 'Adjei',
+    Email: 'kwame.adjei@school.edu',
+    Position: 'Teacher',
+    Employment_Date: '2024-09-01',
+  }, overrides || {});
+}
+
+section('Phase 3: students.list and students.get');
+
+check('P3: students.list returns all non-blank student rows', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({
+    studentRows: [
+      rowFor(P3_STUDENT_COLUMNS, { Student_ID: 'STU-1', First_Name: 'Ama', Last_Name: 'Mensah', Status: 'Active' }),
+      rowFor(P3_STUDENT_COLUMNS, { Student_ID: 'STU-2', First_Name: 'Kofi', Last_Name: 'Owusu', Status: 'Active' }),
+      ['', '', '', ''],
+      rowFor(P3_STUDENT_COLUMNS, { Student_ID: 'STU-3', First_Name: 'Yaa', Last_Name: 'Boateng', Status: 'Withdrawn' }),
+    ],
+  }));
+  var envelope = doGetEnvelope(apiS, { action: 'students.list' });
+  eq(envelope.success, true);
+  eq(envelope.data.count, 3);
+  ok(envelope.data.students.length === 3, 'list should skip blank rows');
+  eq(envelope.data.students[0].First_Name, 'Ama');
+  eq(envelope.data.students[2].Status, 'Withdrawn');
+});
+
+check('P3: students.get returns an existing student', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({
+    studentRows: [
+      rowFor(P3_STUDENT_COLUMNS, { Student_ID: 'STU-1', First_Name: 'Ama', Last_Name: 'Mensah', Status: 'Active' }),
+    ],
+  }));
+  var envelope = doGetEnvelope(apiS, { action: 'students.get', Student_ID: 'STU-1' });
+  eq(envelope.success, true);
+  eq(envelope.data.Student_ID, 'STU-1');
+  eq(envelope.data.First_Name, 'Ama');
+});
+
+check('P3: students.get missing student is NOT_FOUND', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doGetEnvelope(apiS, { action: 'students.get', Student_ID: 'NOPE-999' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.NOT_FOUND);
+});
+
+section('Phase 3: students.create');
+
+check('P3: students.create validates required fields', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'students.create', { First_Name: 'Ama', Last_Name: 'Mensah' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+  ok(envelope.details.missingFields.indexOf('Class') !== -1, 'should flag missing Class');
+});
+
+check('P3: students.create generates a server-side Student_ID', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'students.create', p3StudentPayload());
+  eq(envelope.success, true);
+  ok(/^STU-\d{8}-[0-9A-F]{12}$/.test(envelope.data.Student_ID), 'unexpected id shape: ' + envelope.data.Student_ID);
+  eq(envelope.data.Status, 'Active');
+});
+
+check('P3: students.create rejects a client-supplied Student_ID', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'students.create', p3StudentPayload({ Student_ID: 'STU-HACKED' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+  ok(envelope.message.indexOf('server-generated') !== -1, 'message should explain the rule');
+});
+
+check('P3: students.create rejects unknown fields', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'students.create', p3StudentPayload({ Middle_Name: 'X' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+  ok(envelope.details.unknownColumns.indexOf('Middle_Name') !== -1, 'should list unknown columns');
+});
+
+check('P3: students.create rejects an invalid Status', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'students.create', p3StudentPayload({ Status: 'Zombie' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('P3: students.create rejects a malformed Guardian_Email', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'students.create', p3StudentPayload({ Guardian_Email: 'not-an-email' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+});
+
+section('Phase 3: students.update and students.withdraw');
+
+check('P3: students.update preserves unspecified fields (partial update)', function () {
+  var ss = makePhase3Spreadsheet({
+    studentRows: [
+      rowFor(P3_STUDENT_COLUMNS, { Student_ID: 'STU-1', First_Name: 'Ama', Last_Name: 'Mensah', Class: '2A', Status: 'Active', Guardian_Phone: '12345' }),
+    ],
+  });
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var envelope = doPostEnvelope(apiS, 'students.update', { Student_ID: 'STU-1', First_Name: 'Ama', Last_Name: 'Mensah' });
+  eq(envelope.success, true);
+  eq(envelope.data.Class, '2A');
+  eq(envelope.data.Guardian_Phone, '12345');
+  eq(envelope.data.Status, 'Active');
+});
+
+check('P3: students.update never changes the immutable Student_ID', function () {
+  var ss = makePhase3Spreadsheet({
+    studentRows: [
+      rowFor(P3_STUDENT_COLUMNS, { Student_ID: 'STU-1', First_Name: 'Ama', Last_Name: 'Mensah', Class: '2A', Status: 'Active' }),
+    ],
+  });
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var envelope = doPostEnvelope(apiS, 'students.update', { Student_ID: 'STU-1', Last_Name: 'Mensah-Edited' });
+  eq(envelope.success, true);
+  eq(envelope.data.Student_ID, 'STU-1', 'Student_ID must be immutable');
+  var listed = doGetEnvelope(apiS, { action: 'students.list' });
+  var matches = listed.data.students.filter(function (s) { return s.Student_ID === 'STU-1'; });
+  eq(matches.length, 1, 'exactly one row must keep the original Student_ID');
+  eq(matches[0].Last_Name, 'Mensah-Edited');
+});
+
+check('P3: students.update missing student is NOT_FOUND', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'students.update', { Student_ID: 'NOPE-999', First_Name: 'Ama' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.NOT_FOUND);
+});
+
+check('P3: students.withdraw sets Status and Withdrawal_Date', function () {
+  var ss = makePhase3Spreadsheet({
+    studentRows: [
+      rowFor(P3_STUDENT_COLUMNS, { Student_ID: 'STU-1', First_Name: 'Ama', Last_Name: 'Mensah', Status: 'Active' }),
+    ],
+  });
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var envelope = doPostEnvelope(apiS, 'students.withdraw', { Student_ID: 'STU-1' });
+  eq(envelope.success, true);
+  eq(envelope.data.Status, 'Withdrawn');
+  ok(envelope.data.Withdrawal_Date, 'Withdrawal_Date should be set');
+});
+
+check('P3: withdrawn student remains in the sheet (soft delete)', function () {
+  var ss = makePhase3Spreadsheet({
+    studentRows: [
+      rowFor(P3_STUDENT_COLUMNS, { Student_ID: 'STU-1', First_Name: 'Ama', Last_Name: 'Mensah', Status: 'Active' }),
+    ],
+  });
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  doPostEnvelope(apiS, 'students.withdraw', { Student_ID: 'STU-1' });
+  var envelope = doGetEnvelope(apiS, { action: 'students.list' });
+  eq(envelope.success, true);
+  ok(envelope.data.students.length >= 1, 'withdrawn student must remain in sheet');
+  var found = envelope.data.students.filter(function (s) { return s.Student_ID === 'STU-1'; });
+  eq(found.length, 1);
+  eq(found[0].Status, 'Withdrawn');
+});
+
+check('P3: students.withdraw missing student is NOT_FOUND', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'students.withdraw', { Student_ID: 'NOPE-999' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.NOT_FOUND);
+});
+
+section('Phase 3: students persistence, conflicts and authorization');
+
+check('P3: students.create write survives on a fresh sheet', function () {
+  var ss = makePhase3Spreadsheet({});
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var created = doPostEnvelope(apiS, 'students.create', p3StudentPayload());
+  eq(created.success, true);
+  var listed = doGetEnvelope(apiS, { action: 'students.list' });
+  eq(listed.data.count, 1);
+  var dup = listed.data.students.filter(function (s) { return s.Student_ID === created.data.Student_ID; });
+  eq(dup.length, 1);
+});
+
+check('P3: students.create reports CONFLICT when the generated ID already exists', function () {
+  var forcedUuid = '0f1e2d3c4b5a69788796a5b4c3d2e1f0';
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}), {
+    uuid: function () { return forcedUuid; },
+  });
+  var first = doPostEnvelope(apiS, 'students.create', p3StudentPayload({ First_Name: 'Ama' }));
+  eq(first.success, true);
+  var second = doPostEnvelope(apiS, 'students.create', p3StudentPayload({ First_Name: 'Kofi' }));
+  eq(second.success, false);
+  eq(second.error, ERROR_CODES.CONFLICT);
+});
+
+check('P3: students denied without permission is FORBIDDEN', function () {
+  var apiT = loadBackendAs('teacher@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doGetEnvelope(apiT, { action: 'students.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.FORBIDDEN);
+});
+
+check('P3: students unauthenticated without Google identity is UNAUTHORIZED', function () {
+  var apiBlank = loadBackendAs('', makePhase3Spreadsheet({}));
+  var envelope = doGetEnvelope(apiBlank, { action: 'students.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.UNAUTHORIZED);
+});
+
+section('Phase 3: structural failures (Students)');
+
+check('P3: students.list missing Students sheet is SERVER_ERROR', function () {
+  var apiS = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', ''],
+  ]));
+  var envelope = doGetEnvelope(apiS, { action: 'students.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.SERVER_ERROR);
+});
+
+check('P3: students.list missing required columns is SERVER_ERROR', function () {
+  var ss = makeSpreadsheet('SchoolManagementSystem', [
+    makeSheet('Students', [['Student_ID', 'First_Name']]),
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+  ]);
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var envelope = doGetEnvelope(apiS, { action: 'students.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.SERVER_ERROR);
+  ok(envelope.details.missingColumns.length > 0, 'should report which columns are missing');
+});
+
+check('P3: students.create respects script locking on write', function () {
+  var ss = makePhase3Spreadsheet({});
+  var apiLocked = loadBackendAs('admin@school.edu', ss, { lockUnavailable: true });
+  var envelope = doPostEnvelope(apiLocked, 'students.create', p3StudentPayload());
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.CONFLICT);
+});
+
+section('Phase 3: staff.list and staff.get');
+
+check('P3: staff.list returns all non-blank staff rows', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({
+    staffRows: [
+      rowFor(P3_STAFF_COLUMNS, { Staff_ID: 'STF-1', First_Name: 'Kwame', Last_Name: 'Adjei', Employment_Status: 'Active' }),
+      rowFor(P3_STAFF_COLUMNS, { Staff_ID: 'STF-2', First_Name: 'Abena', Last_Name: 'Osei', Employment_Status: 'Active' }),
+      ['', '', '', ''],
+      rowFor(P3_STAFF_COLUMNS, { Staff_ID: 'STF-3', First_Name: 'Yaw', Last_Name: 'Nkrumah', Employment_Status: 'Inactive' }),
+    ],
+  }));
+  var envelope = doGetEnvelope(apiS, { action: 'staff.list' });
+  eq(envelope.success, true);
+  eq(envelope.data.count, 3);
+  ok(envelope.data.staff.length === 3, 'list should skip blank rows');
+  eq(envelope.data.staff[0].First_Name, 'Kwame');
+  eq(envelope.data.staff[2].Employment_Status, 'Inactive');
+});
+
+check('P3: staff.get returns an existing staff member', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({
+    staffRows: [
+      rowFor(P3_STAFF_COLUMNS, { Staff_ID: 'STF-1', First_Name: 'Kwame', Last_Name: 'Adjei', Employment_Status: 'Active' }),
+    ],
+  }));
+  var envelope = doGetEnvelope(apiS, { action: 'staff.get', Staff_ID: 'STF-1' });
+  eq(envelope.success, true);
+  eq(envelope.data.Staff_ID, 'STF-1');
+  eq(envelope.data.First_Name, 'Kwame');
+});
+
+check('P3: staff.get missing staff is NOT_FOUND', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doGetEnvelope(apiS, { action: 'staff.get', Staff_ID: 'NOPE-999' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.NOT_FOUND);
+});
+
+section('Phase 3: staff.create');
+
+check('P3: staff.create validates required fields', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.create', { First_Name: 'Kwame', Last_Name: 'Adjei' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+  ok(envelope.details.missingFields.indexOf('Position') !== -1, 'should flag missing Position');
+});
+
+check('P3: staff.create generates a server-side Staff_ID', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.create', p3StaffPayload());
+  eq(envelope.success, true);
+  ok(/^STF-\d{8}-[0-9A-F]{12}$/.test(envelope.data.Staff_ID), 'unexpected id shape: ' + envelope.data.Staff_ID);
+  eq(envelope.data.Employment_Status, 'Active');
+});
+
+check('P3: staff.create rejects a client-supplied Staff_ID', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.create', p3StaffPayload({ Staff_ID: 'STF-HACKED' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+  ok(envelope.message.indexOf('server-generated') !== -1, 'message should explain the rule');
+});
+
+check('P3: staff.create rejects unknown fields', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.create', p3StaffPayload({ Middle_Name: 'X' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+  ok(envelope.details.unknownColumns.indexOf('Middle_Name') !== -1, 'should list unknown columns');
+});
+
+check('P3: staff.create rejects an invalid Employment_Status', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.create', p3StaffPayload({ Employment_Status: 'Zombie' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('P3: staff.create rejects a malformed Email', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.create', p3StaffPayload({ Email: 'not-an-email' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('P3: staff.create rejects a negative Salary_Amount', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.create', p3StaffPayload({ Salary_Amount: -500 }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('P3: staff.create rejects an invalid Salary_Frequency', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.create', p3StaffPayload({ Salary_Frequency: 'Fortnightly' }));
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.VALIDATION_ERROR);
+});
+
+section('Phase 3: staff.update and staff.deactivate');
+
+check('P3: staff.update preserves unspecified fields (partial update)', function () {
+  var ss = makePhase3Spreadsheet({
+    staffRows: [
+      rowFor(P3_STAFF_COLUMNS, { Staff_ID: 'STF-1', First_Name: 'Kwame', Last_Name: 'Adjei', Department: 'Science', Salary_Amount: 1500, Employment_Status: 'Active' }),
+    ],
+  });
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var envelope = doPostEnvelope(apiS, 'staff.update', { Staff_ID: 'STF-1', First_Name: 'Kwame', Last_Name: 'Adjei' });
+  eq(envelope.success, true);
+  eq(envelope.data.Department, 'Science');
+  eq(envelope.data.Salary_Amount, 1500);
+  eq(envelope.data.Employment_Status, 'Active');
+});
+
+check('P3: staff.update never changes the immutable Staff_ID', function () {
+  var ss = makePhase3Spreadsheet({
+    staffRows: [
+      rowFor(P3_STAFF_COLUMNS, { Staff_ID: 'STF-1', First_Name: 'Kwame', Last_Name: 'Adjei', Employment_Status: 'Active' }),
+    ],
+  });
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var envelope = doPostEnvelope(apiS, 'staff.update', { Staff_ID: 'STF-1', Last_Name: 'Adjei-Edited' });
+  eq(envelope.success, true);
+  eq(envelope.data.Staff_ID, 'STF-1', 'Staff_ID must be immutable');
+  var listed = doGetEnvelope(apiS, { action: 'staff.list' });
+  var matches = listed.data.staff.filter(function (s) { return s.Staff_ID === 'STF-1'; });
+  eq(matches.length, 1, 'exactly one row must keep the original Staff_ID');
+  eq(matches[0].Last_Name, 'Adjei-Edited');
+});
+
+check('P3: staff.update missing staff is NOT_FOUND', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.update', { Staff_ID: 'NOPE-999', First_Name: 'Kwame' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.NOT_FOUND);
+});
+
+check('P3: staff.deactivate sets Employment_Status to Inactive', function () {
+  var ss = makePhase3Spreadsheet({
+    staffRows: [
+      rowFor(P3_STAFF_COLUMNS, { Staff_ID: 'STF-1', First_Name: 'Kwame', Last_Name: 'Adjei', Employment_Status: 'Active' }),
+    ],
+  });
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var envelope = doPostEnvelope(apiS, 'staff.deactivate', { Staff_ID: 'STF-1' });
+  eq(envelope.success, true);
+  eq(envelope.data.Employment_Status, 'Inactive');
+});
+
+check('P3: deactivated staff record remains in the sheet (soft delete)', function () {
+  var ss = makePhase3Spreadsheet({
+    staffRows: [
+      rowFor(P3_STAFF_COLUMNS, { Staff_ID: 'STF-1', First_Name: 'Kwame', Last_Name: 'Adjei', Employment_Status: 'Active' }),
+    ],
+  });
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  doPostEnvelope(apiS, 'staff.deactivate', { Staff_ID: 'STF-1' });
+  var envelope = doGetEnvelope(apiS, { action: 'staff.list' });
+  eq(envelope.success, true);
+  var found = envelope.data.staff.filter(function (s) { return s.Staff_ID === 'STF-1'; });
+  eq(found.length, 1);
+  eq(found[0].Employment_Status, 'Inactive');
+});
+
+check('P3: staff.deactivate missing staff is NOT_FOUND', function () {
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doPostEnvelope(apiS, 'staff.deactivate', { Staff_ID: 'NOPE-999' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.NOT_FOUND);
+});
+
+section('Phase 3: staff persistence, conflicts and authorization');
+
+check('P3: staff.create write survives on a fresh sheet', function () {
+  var ss = makePhase3Spreadsheet({});
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var created = doPostEnvelope(apiS, 'staff.create', p3StaffPayload());
+  eq(created.success, true);
+  var listed = doGetEnvelope(apiS, { action: 'staff.list' });
+  eq(listed.data.count, 1);
+  var dup = listed.data.staff.filter(function (s) { return s.Staff_ID === created.data.Staff_ID; });
+  eq(dup.length, 1);
+});
+
+check('P3: staff.create reports CONFLICT when the generated ID already exists', function () {
+  var forcedUuid = '9a8b7c6d5e4f0112233445566778899a';
+  var apiS = loadBackendAs('admin@school.edu', makePhase3Spreadsheet({}), {
+    uuid: function () { return forcedUuid; },
+  });
+  var first = doPostEnvelope(apiS, 'staff.create', p3StaffPayload({ First_Name: 'Kwame' }));
+  eq(first.success, true);
+  var second = doPostEnvelope(apiS, 'staff.create', p3StaffPayload({ First_Name: 'Kojo' }));
+  eq(second.success, false);
+  eq(second.error, ERROR_CODES.CONFLICT);
+});
+
+check('P3: staff denied without permission is FORBIDDEN', function () {
+  var apiT = loadBackendAs('teacher@school.edu', makePhase3Spreadsheet({}));
+  var envelope = doGetEnvelope(apiT, { action: 'staff.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.FORBIDDEN);
+});
+
+check('P3: staff unauthenticated without Google identity is UNAUTHORIZED', function () {
+  var apiBlank = loadBackendAs('', makePhase3Spreadsheet({}));
+  var envelope = doGetEnvelope(apiBlank, { action: 'staff.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.UNAUTHORIZED);
+});
+
+section('Phase 3: structural failures (Staff)');
+
+check('P3: staff.list missing Staff sheet is SERVER_ERROR', function () {
+  var apiS = loadBackendAs('admin@school.edu', makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', ''],
+  ]));
+  var envelope = doGetEnvelope(apiS, { action: 'staff.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.SERVER_ERROR);
+});
+
+check('P3: staff.list missing required columns is SERVER_ERROR', function () {
+  var ss = makeSpreadsheet('SchoolManagementSystem', [
+    makeSheet('Staff', [['Staff_ID', 'First_Name']]),
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+  ]);
+  var apiS = loadBackendAs('admin@school.edu', ss);
+  var envelope = doGetEnvelope(apiS, { action: 'staff.list' });
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.SERVER_ERROR);
+  ok(envelope.details.missingColumns.length > 0, 'should report which columns are missing');
+});
+
+check('P3: staff.create respects script locking on write', function () {
+  var ss = makePhase3Spreadsheet({});
+  var apiLocked = loadBackendAs('admin@school.edu', ss, { lockUnavailable: true });
+  var envelope = doPostEnvelope(apiLocked, 'staff.create', p3StaffPayload());
+  eq(envelope.success, false);
+  eq(envelope.error, ERROR_CODES.CONFLICT);
+});
+
 section('Phase boundary (no fake implementations)');
 
-check('every reserved action is genuinely NOT implemented', function () {
+check('every reserved (unimplemented) action still reports NOT_FOUND', function () {
   [
-    'students.list',
-    'students.create',
-    'students.withdraw',
-    'staff.list',
     'schoolFees.create',
     'feedingFees.list',
     'stationery.fulfill',
@@ -1262,11 +1846,16 @@ check('every reserved action is genuinely NOT implemented', function () {
   });
 });
 
-check('no phase-2+ module has been implemented yet', function () {
-  ['Students.js', 'Staff.js', 'SchoolFees.js', 'FeedingFees.js', 'Stationery.js', 'Inventory.js',
+check('no phase-4+ module has been implemented yet', function () {
+  ['SchoolFees.js', 'FeedingFees.js', 'Stationery.js', 'Inventory.js',
    'Salaries.js', 'Delegations.js', 'Dashboard.js', 'Audit.js'].forEach(function (file) {
     const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
     ok(/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' is no longer an untouched placeholder');
+  });
+  // Phase 3 modules are now implemented.
+  ['Students.js', 'Staff.js'].forEach(function (file) {
+    const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
+    ok(!/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' should be implemented in Phase 3');
   });
   // Auth.js and Permissions.js are the Phase 2 scope and must be implemented.
   ['Auth.js', 'Permissions.js'].forEach(function (file) {

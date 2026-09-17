@@ -16,14 +16,14 @@ Apps Script Web App backend serving a single `doGet` / `doPost` JSON API.
 | --- | --- | --- |
 | `appsscript.json` | Manifest (runtime, web app access, timezone) | complete |
 | `.clasp.json` | clasp target config (`scriptId`, extensions) | complete |
-| `Config.js` | Central `CONFIG`: spreadsheet ID, sheet names, enums, action names | Phase 1 complete |
-| `Router.js` | Action dispatcher (`doGet`/`doPost`), route table, `health` action | Phase 1 complete |
+| `Config.js` | Central `CONFIG`: spreadsheet ID, sheet names, enums, action names | Phases 1-3 complete |
+| `Router.js` | Action dispatcher (`doGet`/`doPost`), route table, `health` action | Phases 1-3 routed |
 | `Response.js` | `success()`, `failure()`, `jsonResponse()` + error-code taxonomy | Phase 1 complete |
-| `Auth.js` | login / session / credential checks | **empty stub** |
-| `Permissions.js` | role + permission resolution | **empty stub** |
+| `Auth.js` | login / session / credential checks | Phase 2 complete |
+| `Permissions.js` | role + permission resolution | Phase 2 complete (temporary Admin-only map) |
 | `Audit.js` | append-only audit logging | **empty stub** |
-| `Students.js` | student CRUD | **empty stub** |
-| `Staff.js` | staff CRUD | **empty stub** |
+| `Students.js` | student list/get/create/update/withdraw | Phase 3 complete |
+| `Staff.js` | staff list/get/create/update/deactivate | Phase 3 complete |
 | `SchoolFees.js` | school fee billing/payments | **empty stub** |
 | `FeedingFees.js` | feeding fee billing/payments | **empty stub** |
 | `Stationery.js` | stationery sales | **empty stub** |
@@ -41,8 +41,19 @@ function myFunction() {
 }
 ```
 
-That is the Apps Script default placeholder. **12 business modules are still
-untouched at this level** and need implementing.
+That is the Apps Script default placeholder. **8 business modules are still
+untouched at this level** (SchoolFees, FeedingFees, Stationery, Inventory,
+Salaries, Delegations, Dashboard, Audit) and need implementing.
+
+## Implementation status
+
+- **Phase 1** (foundation): complete.
+- **Phase 2** (authentication / authorization): complete.
+- **Phase 3** (Students + Staff): implemented and covered by the test suite
+  (route table, CRUD, soft delete, validation, locking, permission errors).
+  Implemented locally only — **not committed, pushed, or deployed yet**; the
+  8 remaining modules above are untouched stubs whose actions still return
+  `NOT_FOUND`.
 
 ## API shape (action-based, not REST)
 
@@ -100,7 +111,7 @@ clasp push               # .clasp.json supplies the scriptId
 No test framework is used. There are two zero-dependency Node scripts:
 
 ```bash
-node tests/backend.test.js      # 78 tests: config, utils, response, router, health
+node tests/backend.test.js      # 146 tests: config, utils, response, router, health, auth, students, staff
 node tests/claspignore.test.js  # 9 tests: proves frontend/ can never be pushed
 ```
 
@@ -140,11 +151,13 @@ backend files, so nothing in `frontend/`, `tests/`, `docs/` or any
    the owner can invoke the deployment, so the `health` action cannot yet be
    verified over HTTP from a browser or the frontend. Changing this needs
    explicit approval; the React frontend will require `ANYONE`.
-4. **12 business modules are still untouched stubs** (see the table above).
+4. **8 business modules are still untouched stubs** (see the table above).
    Every `module.verb` action name in `CONFIG.ACTIONS` is a reserved identifier
    only — the router returns `NOT_FOUND` for all of them.
 5. **`CONFIG.PAYMENT_METHOD` values are an assumption** and need confirming with
    the school.
 6. **No `Role_Permissions` mapping sheet exists yet.** `Roles` and `Permissions`
-   share no key, so role→permission resolution cannot work. The original design
-   notes listed `ROLE_PERMISSIONS`; it must be reinstated before Phase 3.
+   share no key, so role→permission resolution cannot read from the sheet.
+   `Permissions.js` therefore still uses its temporary Admin-only map
+   (`TEMP_ROLE_PERMISSIONS_`); replace it with a sheet read before granting
+   real permissions to teacher/accountant roles (needed by Phase 4 and later).

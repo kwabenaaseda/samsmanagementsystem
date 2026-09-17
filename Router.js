@@ -46,8 +46,11 @@ function doPost(e) {
  *
  * Built on demand rather than as a top-level constant, so the router never
  * depends on the order in which Apps Script evaluates the project files.
- * Built on demand rather than as a top-level constant, so the router never
- * depends on the order in which Apps Script evaluates the project files.
+ *
+ * Phase 1 (health) and Phase 2 (auth.me / auth.check) plus Phase 3
+ * (students.* / staff.*) are routed. Every other action name in
+ * CONFIG.ACTIONS is a reserved identifier for a later phase and currently
+ * returns NOT_FOUND.
  *
  * @return {Object<string, Function>} Map of action name to handler.
  */
@@ -56,6 +59,16 @@ function getRoutes_() {
   routes[CONFIG.ACTIONS.HEALTH] = handleHealth_;
   routes[CONFIG.ACTIONS.AUTH.ME] = handleAuthMe_;
   routes[CONFIG.ACTIONS.AUTH.CHECK] = handleAuthCheck_;
+  routes[CONFIG.ACTIONS.STUDENTS.LIST] = handleStudentsList_;
+  routes[CONFIG.ACTIONS.STUDENTS.GET] = handleStudentsGet_;
+  routes[CONFIG.ACTIONS.STUDENTS.CREATE] = handleStudentsCreate_;
+  routes[CONFIG.ACTIONS.STUDENTS.UPDATE] = handleStudentsUpdate_;
+  routes[CONFIG.ACTIONS.STUDENTS.WITHDRAW] = handleStudentsWithdraw_;
+  routes[CONFIG.ACTIONS.STAFF.LIST] = handleStaffList_;
+  routes[CONFIG.ACTIONS.STAFF.GET] = handleStaffGet_;
+  routes[CONFIG.ACTIONS.STAFF.CREATE] = handleStaffCreate_;
+  routes[CONFIG.ACTIONS.STAFF.UPDATE] = handleStaffUpdate_;
+  routes[CONFIG.ACTIONS.STAFF.DEACTIVATE] = handleStaffDeactivate_;
   return routes;
 }
 
