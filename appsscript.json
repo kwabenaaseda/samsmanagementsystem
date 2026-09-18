@@ -10,5 +10,8 @@
   "webapp": {
     "executeAs": "USER_DEPLOYING",
     "access": "MYSELF"
+  },
+  "executionApi": {
+    "access": "ANYONE"
   }
 }
