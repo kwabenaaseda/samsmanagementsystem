@@ -21,7 +21,7 @@ const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
 const BACKEND_FILES = [
-  'Config.js',
+  'Api.js', 'Config.js',
   'Response.js',
   'Utils.js',
   'Permissions.js',
