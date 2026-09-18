@@ -3,13 +3,26 @@
  * Google-identity authentication for the School Management System API.
  *
  * MECHANISM: Google identity + Users-sheet allowlist. No passwords are
- * stored and no custom sessions or tokens are issued. The caller identity
- * comes ONLY from Session.getActiveUser().getEmail(), never from request
- * payload, query parameters, or headers.
+ * stored and no custom sessions or tokens are issued by SAMS itself.
  *
- * CAVEAT: getActiveUser() can return blank in some web-app contexts. A
- * blank email is UNAUTHENTICATED (fail closed). Live availability under
- * executeAs USER_DEPLOYING + access MYSELF must be confirmed via auth.me.
+ * Identity is resolved in one of two ways, in priority order:
+ *
+ * 1. OAUTH TOKEN (primary, staff logins): the frontend obtains an OAuth
+ *    access token via Google Identity Services and sends it in the request
+ *    body's reserved `__auth.access_token` field (threaded here by Router.js).
+ *    The token is verified SERVER-SIDE against Google's own userinfo endpoint
+ *    (openidconnect.googleapis.com/v1/userinfo). The verified email from that
+ *    call is the caller's identity. A caller-supplied email is NEVER trusted.
+ *
+ * 2. SESSION IDENTITY (fallback): Session.getActiveUser().getEmail(), the
+ *    original mechanism, still works for owner-execution contexts.
+ *
+ * Google answers "who are you?"; the Users sheet answers "may you use SAMS,
+ * and as what role?". A valid Google token belonging to an email that is not
+ * an Active row in Users is UNAUTHORIZED, never entry.
+ *
+ * The access token is used transiently for the userinfo call and is never
+ * written to any sheet or log.
  *
  * SCHEMA ASSUMPTION: Users header is
  * User_ID, Staff_ID, Email, Role, Status, Last_Login. Role holds a role
@@ -17,8 +30,17 @@
  */
 
 var AUTH_NO_IDENTITY_MESSAGE =
-  'Google identity could not be determined in this execution context. ' +
-  'Confirm Session.getActiveUser().getEmail() on the deployed web app.';
+  'No Google identity could be verified for this request. Sign in with Google from the app.';
+
+/**
+ * Request-scoped OAuth access token, set by Router.js handleRequest_ before
+ * dispatch and cleared afterwards. Apps Script executes each request in its
+ * own context, so a module-level slot is safe.
+ */
+var REQUEST_AUTH_TOKEN_ = null;
+
+/** Google's OpenID Connect userinfo endpoint (first-class, not debug tokeninfo). */
+var GOOGLE_USERINFO_ENDPOINT_ = 'https://openidconnect.googleapis.com/v1/userinfo';
 
 function getAuthenticatedEmail_() {
   try {
@@ -29,6 +51,73 @@ function getAuthenticatedEmail_() {
   } catch (err) {
     return '';
   }
+}
+
+/**
+ * Resolve the caller's email by verifying the OAuth access token against
+ * Google's userinfo endpoint, entirely server-side.
+ *
+ * @param {string} token The bearer access token from __auth.access_token.
+ * @return {string} The verified email address.
+ * @throws UNAUTHORIZED with a distinct `reason` detail for every failure mode.
+ */
+function resolveCallerEmailFromToken_(token) {
+  if (typeof UrlFetchApp === 'undefined' || !UrlFetchApp || typeof UrlFetchApp.fetch !== 'function') {
+    throwError_('Token verification is unavailable in this execution context.',
+      ERROR_CODES.UNAUTHORIZED, { reason: 'token-verification-unavailable' });
+  }
+
+  var response;
+  try {
+    response = UrlFetchApp.fetch(GOOGLE_USERINFO_ENDPOINT_, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + token },
+      muteHttpExceptions: true,
+    });
+  } catch (err) {
+    throwError_('Could not verify the Google identity token.',
+      ERROR_CODES.UNAUTHORIZED, { reason: 'token-verification-failed' });
+  }
+
+  var code = response && typeof response.getResponseCode === 'function'
+    ? response.getResponseCode() : 0;
+  if (code === 401 || code === 403) {
+    // Expired, revoked, or issued for a different client/audience.
+    throwError_('The Google sign-in token is invalid or has expired. Sign in again.',
+      ERROR_CODES.UNAUTHORIZED, { reason: 'token-invalid' });
+  }
+  if (code !== 200) {
+    throwError_('The Google identity token could not be verified.',
+      ERROR_CODES.UNAUTHORIZED, { reason: 'token-verification-failed' });
+  }
+
+  var info;
+  try {
+    info = JSON.parse(response.getContentText());
+  } catch (err) {
+    throwError_('The Google identity token could not be verified.',
+      ERROR_CODES.UNAUTHORIZED, { reason: 'token-verification-failed' });
+  }
+
+  if (!info || info.email_verified !== true || !info.email) {
+    throwError_('The Google account has no verified email address.',
+      ERROR_CODES.UNAUTHORIZED, { reason: 'email-unverified' });
+  }
+  return toTrimmedString_(info.email);
+}
+
+/**
+ * Resolve the caller's email: verified OAuth token first, session identity as
+ * fallback. Returns '' when neither yields an identity.
+ */
+function getCallerEmail_() {
+  if (REQUEST_AUTH_TOKEN_) return resolveCallerEmailFromToken_(REQUEST_AUTH_TOKEN_);
+  return getAuthenticatedEmail_();
+}
+
+/** Test/dispatch hook: install or clear the request-scoped token. */
+function setRequestAuthToken_(token) {
+  REQUEST_AUTH_TOKEN_ = (typeof token === 'string' && token.trim() !== '') ? token.trim() : null;
 }
 
 function normalizeRoleKey_(role) {
@@ -89,7 +178,15 @@ function findActiveUserByEmail_(email) {
 }
 
 function getCurrentUser_() {
-  var email = getAuthenticatedEmail_();
+  var email;
+  try {
+    email = getCallerEmail_();
+  } catch (err) {
+    // Token resolution failures (unverified email, invalid/expired token,
+    // userinfo outage) are auth outcomes, not crashes: report them as a
+    // structured error result so every caller sees { user, error }.
+    return { user: null, error: err };
+  }
   if (email === '') {
     return { user: null, error: appError_(AUTH_NO_IDENTITY_MESSAGE,
       ERROR_CODES.UNAUTHORIZED, { reason: 'no-google-identity' }) };

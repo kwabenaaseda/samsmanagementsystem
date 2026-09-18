@@ -429,3 +429,164 @@ function setupRolePermissions() {
     return report;
   });
 }
+
+/**
+ * Get the effective permission codes granted to a role by its Role_ID.
+ *
+ * Reads the Role_Permissions mapping, joins to Permissions, derives the
+ * permission CODE (Module + "." + Action in UPPER_SNAKE), and returns only
+ * the ACTIVE mappings. Inactive or missing mappings grant nothing.
+ *
+ * @param {string} roleId The Role_ID (or Role_Name if idColumn is the name column).
+ * @return {string[]} Sorted array of permission codes (e.g. ['STUDENTS.READ', ...]).
+ */
+function getEffectivePermissionsForRole_(roleId) {
+  var permissions = getPermissionsIndex_();
+  var codes = {};
+  readRolePermissionRows_().forEach(function (mapping) {
+    if (toTrimmedString_(mapping.Role_ID).toLowerCase() !== toTrimmedString_(roleId).toLowerCase()) return;
+    if (toTrimmedString_(mapping.Status) !== 'Active') return;
+    var code = permissions.byId[toTrimmedString_(mapping.Permission_ID).toLowerCase()];
+    if (code) codes[code] = true;
+  });
+  return Object.keys(codes).sort();
+}
+
+/**
+ * Seed the MVP1 operational roles and their permission mappings.
+ *
+ * Run ONCE from the Apps Script editor (Run > setupMvp1Roles) after
+ * setupRolePermissions() has been run. It is deliberately NOT an API action:
+ * it is an owner-run setup step, documented in README.md.
+ *
+ * What it does (idempotent -- safe to re-run):
+ *   1. Ensures the Roles sheet has rows for the five MVP1 operational roles
+ *      (Admin already seeded by setupRolePermissions): School Fees Officer,
+ *      Feeding Fees Officer, Inventory/Stationery Officer, Staff Viewer.
+ *   2. Maps each role to exactly the MVP1 permissions defined in the project
+ *      brief. Existing mappings for Admin are preserved and not touched.
+ *   3. Does NOT grant any MVP2 permissions (SALARIES.*, DELEGATIONS.*,
+ *      AUDIT_LOG.*) to operational roles.
+ *
+ * MVP1 ROLE -> PERMISSION MAPPING:
+ *   Admin                  -> all permissions (already handled by setupRolePermissions)
+ *   School Fees Officer    -> STUDENTS.READ, SCHOOL_FEES.READ, SCHOOL_FEES.CREATE, DASHBOARD.READ
+ *   Feeding Fees Officer   -> STUDENTS.READ, FEEDING_FEES.READ, FEEDING_FEES.CREATE, DASHBOARD.READ
+ *   Inventory/Stationery   -> STUDENTS.READ, STATIONERY.READ, STATIONERY.CREATE, STATIONERY.FULFILL,
+ *                             INVENTORY.READ, INVENTORY.CREATE, INVENTORY.ADJUST, DASHBOARD.READ
+ *   Staff Viewer           -> STUDENTS.READ, STAFF.READ, SCHOOL_FEES.READ, FEEDING_FEES.READ,
+ *                             STATIONERY.READ, INVENTORY.READ, DASHBOARD.READ
+ *
+ * @return {Object} Report of what already existed and what was created.
+ */
+function setupMvp1Roles() {
+  return withScriptLock_(function () {
+    var report = {
+      rolesCreated: [],
+      rolePermissionsCreated: [],
+      rolesAlreadyPresent: 0,
+      rolePermissionsAlreadyPresent: 0
+    };
+
+    var spreadsheet = getSpreadsheet_();
+
+    // 1. Get the roles context and permissions index.
+    var roles = getRolesContext_();
+    var permissions = getPermissionsIndex_();
+
+    // 2. Define the MVP1 role -> permission mappings.
+    var mvp1RolePermissions = {
+      'School Fees Officer': [
+        'STUDENTS.READ',
+        'SCHOOL_FEES.READ',
+        'SCHOOL_FEES.CREATE',
+        'DASHBOARD.READ'
+      ],
+      'Feeding Fees Officer': [
+        'STUDENTS.READ',
+        'FEEDING_FEES.READ',
+        'FEEDING_FEES.CREATE',
+        'DASHBOARD.READ'
+      ],
+      'Inventory/Stationery Officer': [
+        'STUDENTS.READ',
+        'STATIONERY.READ',
+        'STATIONERY.CREATE',
+        'STATIONERY.FULFILL',
+        'INVENTORY.READ',
+        'INVENTORY.CREATE',
+        'INVENTORY.ADJUST',
+        'DASHBOARD.READ'
+      ],
+      'Staff Viewer': [
+        'STUDENTS.READ',
+        'STAFF.READ',
+        'SCHOOL_FEES.READ',
+        'FEEDING_FEES.READ',
+        'STATIONERY.READ',
+        'INVENTORY.READ',
+        'DASHBOARD.READ'
+      ]
+    };
+
+    // 3. Ensure each role exists in the Roles sheet.
+    Object.keys(mvp1RolePermissions).forEach(function (roleName) {
+      var existing = findRoleRow_(roles, roleName);
+      if (existing) {
+        report.rolesAlreadyPresent++;
+        return;
+      }
+      // Role doesn't exist — create it.
+      var newRoleId = generateId_('ROLE');
+      appendRow_(CONFIG.SHEETS.ROLES, {
+        Role_ID: newRoleId,
+        Role_Name: roleName,
+        Description: 'MVP1 operational role — ' + roleName + '.',
+        Status: 'Active'
+      });
+      report.rolesCreated.push(roleName);
+      // Refresh roles context for subsequent lookups.
+      roles = getRolesContext_();
+    });
+
+    // 4. Map each role to its permissions.
+    Object.keys(mvp1RolePermissions).forEach(function (roleName) {
+      var roleRow = findRoleRow_(roles, roleName);
+      if (!roleRow) {
+        throwError_('Role "' + roleName + '" was not found in the Roles sheet; cannot map permissions.',
+          ERROR_CODES.SERVER_ERROR, { sheet: CONFIG.SHEETS.ROLES, reason: 'role-missing' });
+      }
+      var roleId = toTrimmedString_(roleRow.record[roles.idColumn || roles.nameColumn]);
+
+      // Gather already-present permission IDs for this role.
+      var existingPermIds = {};
+      readRolePermissionRows_().forEach(function (row) {
+        if (toTrimmedString_(row.Role_ID).toLowerCase() !== roleId.toLowerCase()) return;
+        var id = toTrimmedString_(row.Permission_ID);
+        if (id !== '') existingPermIds[id.toLowerCase()] = true;
+      });
+
+      // Map each required permission.
+      mvp1RolePermissions[roleName].forEach(function (code) {
+        var permissionId = permissions.idByCode[code];
+        if (!permissionId) {
+          throwError_('Permission code "' + code + '" has no Permission_ID in the Permissions sheet.',
+            ERROR_CODES.SERVER_ERROR, { code: code, role: roleName, reason: 'permission-not-found' });
+        }
+        if (existingPermIds[permissionId.toLowerCase()]) {
+          report.rolePermissionsAlreadyPresent++;
+          return;
+        }
+        appendRow_(CONFIG.SHEETS.ROLE_PERMISSIONS, {
+          Role_Permission_ID: generateId_('RP'),
+          Role_ID: roleId,
+          Permission_ID: permissionId,
+          Status: 'Active'
+        });
+        report.rolePermissionsCreated.push(code + ' -> ' + roleName);
+      });
+    });
+
+    return report;
+  });
+}

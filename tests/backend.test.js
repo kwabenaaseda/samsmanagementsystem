@@ -32,6 +32,7 @@ const BACKEND_FILES = [
   'FeedingFees.js',
   'Stationery.js',
   'Inventory.js',
+  'Dashboard.js',
   'Router.js'
 ];
 
@@ -259,6 +260,23 @@ function makeSandbox(spreadsheet, opts) {
         return simpleFormat(date, pattern);
       },
     },
+    // Simulated UrlFetchApp for OAuth token verification. Tests configure
+    // behaviour via opts.urlFetchThrows and opts.urlFetchResponse.
+    UrlFetchApp: {
+      fetch: function (url, params) {
+        sandbox.__urlFetchCalls = sandbox.__urlFetchCalls || [];
+        sandbox.__urlFetchCalls.push({ url: url, params: params });
+        if (options.urlFetchThrows) throw new Error('Simulated: network failure');
+        const response = options.urlFetchResponse;
+        if (!response) throw new Error('Simulated: no UrlFetchApp response configured');
+        return {
+          getResponseCode: function () { return response.status; },
+          getContentText: function () {
+            return typeof response.body === 'string' ? response.body : JSON.stringify(response.body);
+          },
+        };
+      },
+    },
     ContentService: {
       MimeType: { JSON: 'application/json' },
       createTextOutput: function (text) {
@@ -299,6 +317,9 @@ function loadBackend(sandbox) {
     ' normalizeRoleKey_: (typeof normalizeRoleKey_ !== "undefined" ? normalizeRoleKey_ : undefined),' +
     ' findActiveUserByEmail_: (typeof findActiveUserByEmail_ !== "undefined" ? findActiveUserByEmail_ : undefined),' +
     ' getCurrentUser_: (typeof getCurrentUser_ !== "undefined" ? getCurrentUser_ : undefined),' +
+   ' getCallerEmail_: (typeof getCallerEmail_ !== "undefined" ? getCallerEmail_ : undefined),' +
+   ' resolveCallerEmailFromToken_: (typeof resolveCallerEmailFromToken_ !== "undefined" ? resolveCallerEmailFromToken_ : undefined),' +
+   ' setRequestAuthToken_: (typeof setRequestAuthToken_ !== "undefined" ? setRequestAuthToken_ : undefined),' +
     ' requireAuthentication_: (typeof requireAuthentication_ !== "undefined" ? requireAuthentication_ : undefined),' +
     ' assertValidPermissionFormat_: (typeof assertValidPermissionFormat_ !== "undefined" ? assertValidPermissionFormat_ : undefined),' +
     ' resolveRolePermissions_: (typeof resolveRolePermissions_ !== "undefined" ? resolveRolePermissions_ : undefined),' +
@@ -659,9 +680,10 @@ check('VALUES are derived from, not duplicated alongside, the enums', function (
   }));
 });
 
-check('health, auth, Phase 3 and Phase 4B actions are routed', function () {
+check('health, auth, Phase 3, Phase 4B and dashboard actions are routed', function () {
   eq(api.listAvailableActions_().sort(), [
     'auth.check', 'auth.me',
+    'dashboard.summary',
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
@@ -1177,12 +1199,61 @@ check('parseRequest_ requires payload to be an object', function () {
   eq(err.details.receivedType, 'array');
 });
 
+check('parseRequest_ ignores common URL tracking parameters (utm_*)', function () {
+  // inventory.list with utm_source should succeed - the tracking param is ignored
+  const request1 = api.parseRequest_({
+    parameter: {
+      action: 'inventory.list',
+      utm_source: 'chatgpt',
+      utm_medium: 'link',
+      utm_campaign: 'test',
+    },
+  });
+  eq(request1.action, 'inventory.list');
+  eq(request1.payload.utm_source, undefined, 'utm_source should be stripped');
+  eq(request1.payload.utm_medium, undefined, 'utm_medium should be stripped');
+  eq(request1.payload.utm_campaign, undefined, 'utm_campaign should be stripped');
+  eq(Object.keys(request1.payload).length, 0, 'payload should be empty');
+
+  // inventory.movements with utm_* should also succeed
+  const request2 = api.parseRequest_({
+    parameter: {
+      action: 'inventory.movements',
+      utm_source: 'chatgpt',
+      utm_term: 'search',
+      utm_content: 'preview',
+    },
+  });
+  eq(request2.action, 'inventory.movements');
+  eq(request2.payload.utm_source, undefined);
+  eq(request2.payload.utm_term, undefined);
+  eq(request2.payload.utm_content, undefined);
+  eq(Object.keys(request2.payload).length, 0);
+});
+
+check('parseRequest_ still passes through legitimate API parameters alongside tracking params', function () {
+  // Legitimate filter params should still be passed through
+  const request = api.parseRequest_({
+    parameter: {
+      action: 'inventory.list',
+      Item_ID: 'ITM-001',
+      utm_source: 'chatgpt',
+      Category: 'Stationery',
+    },
+  });
+  eq(request.action, 'inventory.list');
+  eq(request.payload.Item_ID, 'ITM-001');
+  eq(request.payload.Category, 'Stationery');
+  eq(request.payload.utm_source, undefined, 'utm_source should still be stripped');
+});
+
 check('a missing action is rejected with all routed actions', function () {
   const envelope = readEnvelope(api.doGet({ parameter: {} }));
   eq(envelope.success, false);
   eq(envelope.error, 'VALIDATION_ERROR');
   eq(envelope.details.availableActions.sort(), [
     'auth.check', 'auth.me',
+    'dashboard.summary',
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
@@ -1202,6 +1273,7 @@ check('an unknown action is NOT_FOUND and names what is available', function () 
   eq(envelope.details.action, 'does.notExist');
   eq(envelope.details.availableActions.sort(), [
     'auth.check', 'auth.me',
+    'dashboard.summary',
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
@@ -1411,6 +1483,134 @@ check('P2: throwing Session fails closed UNAUTHORIZED', function () {
 });
 
 
+section('Phase 2a: OAuth token authentication (__auth.access_token)');
+
+/**
+ * Sandbox with no session identity, where Google's userinfo endpoint answers
+ * with `body` and HTTP `status`. Simulates the staff Gmail flow: identity comes
+ * exclusively from the verified token, never from the session.
+ */
+function makeTokenSandbox(usersRows, userinfo) {
+  const sb = makeSandbox(makeAuthSpreadsheet(usersRows), {
+    urlFetchResponse: userinfo,
+  });
+  sb.Session.__activeEmail = ''; // no session identity
+  return sb;
+}
+
+const GOOD_USERINFO = { status: 200, body: { sub: 'g-1', email: 'admin@school.edu', email_verified: true } };
+
+check('P2a: verified token authenticates the matching Active user', function () {
+  const sb = makeTokenSandbox(
+    [['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']],
+    GOOD_USERINFO
+  );
+  const api = loadBackend(sb);
+  api.setRequestAuthToken_('tok-abc');
+  const result = api.getCurrentUser_();
+  eq(result.error, null);
+  eq(result.user.email, 'admin@school.edu');
+  eq(result.user.role, 'Admin');
+  // The userinfo call must hit Google's endpoint with the bearer token.
+  eq(sb.__urlFetchCalls.length, 1);
+  eq(sb.__urlFetchCalls[0].url, 'https://openidconnect.googleapis.com/v1/userinfo');
+  eq(sb.__urlFetchCalls[0].params.headers.Authorization, 'Bearer tok-abc');
+});
+
+check('P2a: token email absent from Users is UNAUTHORIZED, never entry', function () {
+  // userinfo proves the Google identity is stranger@gmail.com, which is not an
+  // Active Users row. A client cannot gain access by submitting any email.
+  const sb = makeTokenSandbox(
+    [['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']],
+    { status: 200, body: { sub: 'g-9', email: 'stranger@gmail.com', email_verified: true } }
+  );
+  const api = loadBackend(sb);
+  api.setRequestAuthToken_('tok-abc');
+  const res = api.getCurrentUser_();
+  eq(res.user, null);
+  eq(res.error.code, ERROR_CODES.UNAUTHORIZED);
+  eq(res.error.details.reason, 'no-matching-user');
+});
+
+check('P2a: unverified email on the Google account is rejected', function () {
+  const sb = makeTokenSandbox(
+    [['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']],
+    { status: 200, body: { sub: 'g-1', email: 'admin@school.edu', email_verified: false } }
+  );
+  const api = loadBackend(sb);
+  api.setRequestAuthToken_('tok-abc');
+  const res = api.getCurrentUser_();
+  eq(res.user, null);
+  eq(res.error.code, ERROR_CODES.UNAUTHORIZED);
+  eq(res.error.details.reason, 'email-unverified');
+});
+
+check('P2a: expired/invalid token (401) reports token-invalid', function () {
+  const sb = makeTokenSandbox(
+    [['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']],
+    { status: 401, body: { error: 'invalid_token' } }
+  );
+  const api = loadBackend(sb);
+  api.setRequestAuthToken_('tok-abc');
+  const res = api.getCurrentUser_();
+  eq(res.user, null);
+  eq(res.error.code, ERROR_CODES.UNAUTHORIZED);
+  eq(res.error.details.reason, 'token-invalid');
+});
+
+check('P2a: userinfo network failure fails closed, not open', function () {
+  const sb = makeSandbox(makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]), { urlFetchThrows: true });
+  sb.Session.__activeEmail = '';
+  const api = loadBackend(sb);
+  api.setRequestAuthToken_('tok-abc');
+  const res = api.getCurrentUser_();
+  eq(res.user, null);
+  eq(res.error.code, ERROR_CODES.UNAUTHORIZED);
+  eq(res.error.details.reason, 'token-verification-failed');
+});
+
+check('P2a: Router threads __auth token and strips it from the payload', function () {
+  const sb = makeSandbox(makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]), { urlFetchResponse: GOOD_USERINFO });
+  sb.Session.__activeEmail = ''; // identity must come only from the token
+  const instance = loadBackend(sb);
+  const env = doPostEnvelope(instance, 'auth.me', { __auth: { access_token: 'tok-abc' } });
+  eq(env.success, true, 'token should authenticate the request');
+  eq(env.data.email, 'admin@school.edu');
+  eq(sb.__urlFetchCalls.length, 1, 'userinfo should have been consulted');
+  // The token is request-scoped: after the request it must be cleared, so a
+  // follow-up call with no token falls back to the (blank) session identity.
+  const after = instance.getCurrentUser_();
+  eq(after.user, null, 'token must not leak past the request that carried it');
+});
+
+check('P2a: session identity remains the fallback when no token is sent', function () {
+  const sb = makeSandbox(makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]));
+  sb.Session.__activeEmail = 'admin@school.edu';
+  const env = doPostEnvelope(loadBackend(sb), 'auth.me', {});
+  eq(env.success, true);
+  eq(env.data.email, 'admin@school.edu');
+  eq(sb.__urlFetchCalls, undefined, 'userinfo should not be called without a token');
+});
+
+check('P2a: token takes precedence over a blank session identity', function () {
+  const sb = makeSandbox(makeAuthSpreadsheet([
+    ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']
+  ]), { urlFetchResponse: GOOD_USERINFO });
+  sb.Session.__activeEmail = '';
+  const instance = loadBackend(sb);
+  instance.setRequestAuthToken_('tok-abc');
+  const res = instance.getCurrentUser_();
+  eq(res.error, null);
+  eq(res.user.email, 'admin@school.edu');
+});
+
+
 section('Phase 2: authentication (Auth.js)');
 
 check('P2: blank Google identity yields UNAUTHORIZED with reason', function () {
@@ -1535,6 +1735,14 @@ function doPostEnvelope(apiInstance, action, payload) {
     parameter: {},
     postData: { contents: JSON.stringify({ action: action, payload: payload }) },
   }).getContent());
+}
+
+/** Helper: run doPost as the given Google identity and return parsed envelope. */
+function doPostEnvelopeAs(apiInstance, email, action, payload) {
+  if (apiInstance && apiInstance.__ss && apiInstance.__ss.Session) {
+    apiInstance.__ss.Session.__activeEmail = email;
+  }
+  return doPostEnvelope(apiInstance, action, payload);
 }
 
 /** A valid students.create payload the field-validation tests start from. */
@@ -4198,6 +4406,34 @@ check('inventory.movements is routed', function () {
   ok(api.listAvailableActions_().indexOf('inventory.movements') !== -1);
 });
 
+check('inventory.list tolerates utm_source from ChatGPT link previews', function () {
+  const api5 = p5Api();
+  const env = p5Get(api5, 'inventory.list', { utm_source: 'chatgpt' });
+  eq(env.success, true, 'utm_source must be ignored, not treated as a filter');
+  ok(env.data.length >= 3, 'should return seeded items');
+});
+
+check('inventory.movements tolerates utm_source from ChatGPT link previews', function () {
+  const api5 = p5Api();
+  const env = p5Get(api5, 'inventory.movements', { utm_source: 'chatgpt' });
+  eq(env.success, true, 'utm_source must be ignored, not treated as a filter');
+  ok(env.data.length >= 2, 'should return seeded movements');
+});
+
+check('inventory.list still rejects unknown filter fields (not tracking params)', function () {
+  const api5 = p5Api();
+  throwsWithCode(function () {
+    api5.handleInventoryList_({ bogusField: 'x' });
+  }, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('inventory.movements still rejects unknown filter fields (not tracking params)', function () {
+  const api5 = p5Api();
+  throwsWithCode(function () {
+    api5.handleInventoryMovements_({ bogusField: 'x' });
+  }, ERROR_CODES.VALIDATION_ERROR);
+});
+
 section('Phase 5: list');
 
 check('stationery.list returns transactions', function () {
@@ -4593,6 +4829,88 @@ check('inventory.movements rejects unknown filter fields', function () {
   }, ERROR_CODES.VALIDATION_ERROR);
 });
 
+section('Phase 6: dashboard.summary');
+
+check('dashboard.summary returns the documented aggregate shape', function () {
+  p5LastApi = p5Api();
+  var env = p5Post(p5LastApi, 'dashboard.summary');
+  eq(env.success, true);
+  ok(typeof env.data.activeStudents === 'number', 'activeStudents should be a number');
+  ok(typeof env.data.activeStaff === 'number', 'activeStaff should be a number');
+  ok(typeof env.data.schoolFeesCollected === 'number', 'schoolFeesCollected should be a number');
+  ok(typeof env.data.feedingFeesCollected === 'number', 'feedingFeesCollected should be a number');
+  ok(typeof env.data.lowStockItems === 'number', 'lowStockItems should be a number');
+  ok(Array.isArray(env.data.recentPayments), 'recentPayments should be an array');
+  ok(env.data.recentPayments.length <= 5, 'recentPayments should be at most 5');
+});
+
+check('dashboard.summary reports correct active student count', function () {
+  p5LastApi = p5Api();
+  var env = p5Post(p5LastApi, 'dashboard.summary');
+  eq(env.success, true);
+  eq(env.data.activeStudents, 2, 'two active students (STU-1, STU-2); STU-3 is Withdrawn');
+});
+
+check('dashboard.summary reports correct active staff count', function () {
+  p5LastApi = p5Api();
+  var env = p5Post(p5LastApi, 'dashboard.summary');
+  eq(env.success, true);
+  eq(env.data.activeStaff, 2, 'two active staff (STF-1, STF-2); STF-3 is Inactive');
+});
+
+check('dashboard.summary sums Amount_Paid across both fee sheets', function () {
+  p5LastApi = p5Api();
+  var env = p5Post(p5LastApi, 'dashboard.summary');
+  eq(env.success, true);
+  eq(env.data.schoolFeesCollected, 1800, '1200 + 600 + 0 from School_Fees');
+  eq(env.data.feedingFeesCollected, 675, '450 + 225 from Feeding_Fees');
+});
+
+check('dashboard.summary counts non-In-Stock inventory items', function () {
+  p5LastApi = p5Api();
+  var env = p5Post(p5LastApi, 'dashboard.summary');
+  eq(env.success, true);
+  eq(env.data.lowStockItems, 2, 'ITM-002 (Low Stock) + ITM-003 (Out of Stock)');
+});
+
+check('dashboard.summary returns at most 5 most recent payments', function () {
+  p5LastApi = p5Api();
+  p5Post(p5LastApi, 'schoolFees.create', {
+    Student_ID: 'STU-1', Academic_Year: '2026/2027', Term: 'Term 1',
+    Amount_Due: 500, Amount_Paid: 500, Payment_Method: 'Cash', Payment_Date: '2026-09-01'
+  });
+  p5Post(p5LastApi, 'schoolFees.create', {
+    Student_ID: 'STU-1', Academic_Year: '2026/2027', Term: 'Term 1',
+    Amount_Due: 500, Amount_Paid: 500, Payment_Method: 'Cash', Payment_Date: '2026-09-02'
+  });
+  var env = p5Post(p5LastApi, 'dashboard.summary');
+  eq(env.success, true);
+  ok(env.data.recentPayments.length <= 5, 'should cap at 5 most recent payments');
+});
+
+check('dashboard.summary sorts recent payments most-recent-first', function () {
+  p5LastApi = p5Api();
+  var env = p5Post(p5LastApi, 'dashboard.summary');
+  eq(env.success, true);
+  eq(env.data.recentPayments.length, 5, '3 School_Fees + 2 Feeding_Fees fixture payments');
+  ok(env.data.recentPayments[0].Payment_Date >= env.data.recentPayments[1].Payment_Date, 'payments should be descending');
+  ok(env.data.recentPayments[1].Payment_Date >= env.data.recentPayments[2].Payment_Date, 'payments should be descending');
+  ok(env.data.recentPayments[2].Payment_Date >= env.data.recentPayments[3].Payment_Date, 'payments should be descending');
+});
+
+check('dashboard.summary includes type discriminators on recent payments', function () {
+  p5LastApi = p5Api();
+  var env = p5Post(p5LastApi, 'dashboard.summary');
+  eq(env.success, true);
+  env.data.recentPayments.forEach(function (p) {
+    ok(p.type === 'schoolFees' || p.type === 'feedingFees', 'type must be schoolFees or feedingFees: ' + p.type);
+    ok(typeof p.Payment_ID === 'string' && p.Payment_ID !== '', 'Payment_ID must be present');
+    ok(typeof p.Student_ID === 'string' && p.Student_ID !== '', 'Student_ID must be present');
+    ok(typeof p.Amount_Paid === 'number', 'Amount_Paid must be numeric');
+    ok(typeof p.Payment_Date === 'string' && p.Payment_Date !== '', 'Payment_Date must be present');
+  });
+});
+
 section('Phase 5: permission enforcement');
 
 check('every reserved (unimplemented) action still reports NOT_FOUND', function () {
@@ -4600,7 +4918,6 @@ check('every reserved (unimplemented) action still reports NOT_FOUND', function 
     'salaries.list',
     'delegations.list',
     'audit.list',
-    'dashboard.summary',
   ].forEach(function (action) {
     const envelope = readEnvelope(api.doGet({ parameter: { action: action } }));
     eq(envelope.success, false, action + ' unexpectedly succeeded');
@@ -4612,13 +4929,13 @@ check('Phase 4B fee modules are implemented, later modules still placeholders', 
      // Phase 4B: implemented.
   ['SchoolFees.js', 'FeedingFees.js',
    // Phase 5: now implemented.
-   'Stationery.js', 'Inventory.js'].forEach(function (file) {
+   'Stationery.js', 'Inventory.js', 'Dashboard.js'].forEach(function (file) {
     const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
     ok(!/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' should be implemented in Phase 4B');
   });
     // Phase 5-7 stubs are still untouched placeholders.
   ['Salaries.js',
-   'Delegations.js', 'Dashboard.js', 'Audit.js'].forEach(function (file) {
+   'Delegations.js', 'Audit.js'].forEach(function (file) {
     const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
     ok(/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' is no longer an untouched placeholder');
   });
@@ -4632,6 +4949,65 @@ check('Phase 4B fee modules are implemented, later modules still placeholders', 
     const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
     ok(!/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' should be implemented in Phase 2');
   });
+});
+
+check('dashboard.summary requires DASHBOARD.READ permission', function () {
+  var noPerm = loadBackendAs('teacher@school.edu', makeFullSpreadsheet());
+  var env = noPerm.doPost({ parameter: {},
+    postData: { contents: JSON.stringify({ action: 'dashboard.summary', payload: {} }) } });
+  var result = JSON.parse(env.getContent());
+  eq(result.success, false);
+  eq(result.error, ERROR_CODES.FORBIDDEN);
+});
+
+check('dashboard.summary returns zeros for empty sheets', function () {
+  // DASHBOARD.READ must resolve, so include the authorization tables.
+  var p4aEmpty = p4aPermissionSheets();
+  var emptySs = makeSpreadsheet('EmptyDashboard', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    makeSheet('Students', [['Student_ID', 'Status']]),
+    makeSheet('Staff', [['Staff_ID', 'Employment_Status']]),
+    makeSheet('School_Fees', [['Payment_ID', 'Amount_Paid']]),
+    makeSheet('Feeding_Fees', [['Payment_ID', 'Amount_Paid']]),
+    makeSheet('Inventory', [['Item_ID', 'Status']]),
+    makeSheet('Inventory_Movements', [['Movement_ID']]),
+    p4aEmpty.roles,
+    p4aEmpty.permissions,
+    p4aEmpty.rolePermissions,
+  ]);
+  var emptyApi = loadBackendAs('admin@school.edu', emptySs);
+  var env = doPostEnvelope(emptyApi, 'dashboard.summary', {});
+  console.log('DEBUG env: ' + JSON.stringify(env));
+  eq(env.success, true);
+  eq(env.data.activeStudents, 0);
+  eq(env.data.activeStaff, 0);
+  eq(env.data.schoolFeesCollected, 0);
+  eq(env.data.feedingFeesCollected, 0);
+  eq(env.data.lowStockItems, 0);
+  eq(env.data.recentPayments.length, 0);
+});
+
+check('dashboard.summary: recentPayments empty when both fee sheets are empty', function () {
+  // DASHBOARD.READ must resolve, so include the authorization tables.
+  var p4aNoFees = p4aPermissionSheets();
+  var emptySs = makeSpreadsheet('NoFees', [
+    makeSheet('Users', [['User_ID', 'Staff_ID', 'Email', 'Role', 'Status', 'Last_Login'],
+      ['USR-1', 'STF-1', 'admin@school.edu', 'Admin', 'Active', '']]),
+    makeSheet('Students', [['Student_ID', 'Status']]),
+    makeSheet('Staff', [['Staff_ID', 'Employment_Status']]),
+    makeSheet('School_Fees', [['Payment_ID', 'Amount_Paid']]),
+    makeSheet('Feeding_Fees', [['Payment_ID', 'Amount_Paid']]),
+    makeSheet('Inventory', [['Item_ID', 'Status']]),
+    makeSheet('Inventory_Movements', [['Movement_ID']]),
+    p4aNoFees.roles,
+    p4aNoFees.permissions,
+    p4aNoFees.rolePermissions,
+  ]);
+  var emptyApi = loadBackendAs('admin@school.edu', emptySs);
+  var env = doPostEnvelope(emptyApi, 'dashboard.summary', {});
+  eq(env.success, true);
+  eq(env.data.recentPayments.length, 0, 'no payments when both sheets are empty');
 });
 
 /* ==========================================================================

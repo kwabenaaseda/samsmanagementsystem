@@ -87,6 +87,7 @@ function getRoutes_() {
   routes[CONFIG.ACTIONS.INVENTORY.STOCK_IN] = handleInventoryStockIn_;
   routes[CONFIG.ACTIONS.INVENTORY.STOCK_OUT] = handleInventoryStockOut_;
   routes[CONFIG.ACTIONS.INVENTORY.MOVEMENTS] = handleInventoryMovements_;
+  routes[CONFIG.ACTIONS.DASHBOARD.SUMMARY] = handleDashboardSummary_;
   return routes;
 }
 
@@ -118,9 +119,19 @@ function listAvailableActions_() {
 function parseRequest_(e) {
   const params = (e && e.parameter) || {};
 
+  // Common URL tracking parameters that should be ignored, not treated as API payload.
+  // These are appended by analytics/campaign tools (e.g. ChatGPT link previews add utm_source).
+  const TRACKING_PARAMS = {
+    utm_source: true,
+    utm_medium: true,
+    utm_campaign: true,
+    utm_term: true,
+    utm_content: true,
+  };
+
   const queryPayload = {};
   Object.keys(params).forEach(function (key) {
-    if (key !== 'action') queryPayload[key] = params[key];
+    if (key !== 'action' && !TRACKING_PARAMS[key]) queryPayload[key] = params[key];
   });
 
   let action = toTrimmedString_(params.action);
@@ -205,6 +216,18 @@ function parseRequest_(e) {
 function handleRequest_(e) {
   try {
     const request = parseRequest_(e);
+
+    // Reserved __auth block: carries the caller's OAuth access token from the
+    // frontend. It is removed from the payload before dispatch so handlers
+    // never see auth transport data, and the token is installed in a
+    // request-scoped slot for Auth.js (cleared in the finally block below so
+    // no token can leak into a later execution in the same runtime).
+    const rawAuth = request.payload && request.payload.__auth;
+    if (rawAuth && typeof rawAuth === 'object' && !Array.isArray(rawAuth)) {
+      setRequestAuthToken_(typeof rawAuth.access_token === 'string' ? rawAuth.access_token : null);
+      delete request.payload.__auth;
+    }
+
     const handler = getRoutes_()[request.action];
 
     if (!handler) {
@@ -217,7 +240,13 @@ function handleRequest_(e) {
       );
     }
 
-    const envelope = handler(request.payload, request);
+    let envelope;
+    try {
+      const envelope_ = handler(request.payload, request);
+      envelope = envelope_;
+    } finally {
+      setRequestAuthToken_(null);
+    }
 
     // Guard against a handler returning something that is not an envelope,
     // which would otherwise break the frontend contract silently.

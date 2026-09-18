@@ -66,7 +66,6 @@ const CONFIG = {
     CASH: 'Cash',
     MOBILE_MONEY: 'Mobile Money',
     BANK_TRANSFER: 'Bank Transfer',
-    CHEQUE: 'Cheque',
     OTHER: 'Other'
   },
 
