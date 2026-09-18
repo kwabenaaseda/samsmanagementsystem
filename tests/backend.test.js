@@ -20,7 +20,20 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const BACKEND_FILES = ['Config.js', 'Response.js', 'Utils.js', 'Permissions.js', 'Auth.js', 'Router.js', 'Students.js', 'Staff.js', 'SchoolFees.js', 'FeedingFees.js'];
+const BACKEND_FILES = [
+  'Config.js',
+  'Response.js',
+  'Utils.js',
+  'Permissions.js',
+  'Auth.js',
+  'Students.js',
+  'Staff.js',
+  'SchoolFees.js',
+  'FeedingFees.js',
+  'Stationery.js',
+  'Inventory.js',
+  'Router.js'
+];
 
 /* ==========================================================================
  * Tiny assertion helpers (no framework)
@@ -215,6 +228,9 @@ function makeSandbox(spreadsheet, opts) {
           releaseLock: function () {
             if (sandbox.__lockDepth > 0) sandbox.__lockDepth -= 1;
           },
+          hasLock: function () {
+            return sandbox.__lockDepth > 0;
+          },
         };
       },
     },
@@ -389,9 +405,9 @@ const EXPECTED_TABS = [
 const P4A_PERMISSION_CODES = [
   'STUDENTS.READ', 'STUDENTS.CREATE', 'STUDENTS.UPDATE', 'STUDENTS.WITHDRAW',
   'STAFF.READ', 'STAFF.CREATE', 'STAFF.UPDATE', 'STAFF.DEACTIVATE',
-  'SCHOOL_FEES.READ', 'SCHOOL_FEES.CREATE', 'SCHOOL_FEES.UPDATE', 'SCHOOL_FEES.VOID',
+    'SCHOOL_FEES.READ', 'SCHOOL_FEES.CREATE', 'SCHOOL_FEES.UPDATE', 'SCHOOL_FEES.VOID',
   'FEEDING_FEES.READ', 'FEEDING_FEES.CREATE', 'FEEDING_FEES.UPDATE', 'FEEDING_FEES.VOID',
-  'STATIONERY.READ', 'STATIONERY.CREATE', 'STATIONERY.UPDATE', 'STATIONERY.VOID',
+  'STATIONERY.READ', 'STATIONERY.CREATE', 'STATIONERY.UPDATE', 'STATIONERY.VOID', 'STATIONERY.FULFILL',
   'INVENTORY.READ', 'INVENTORY.CREATE', 'INVENTORY.UPDATE', 'INVENTORY.ADJUST',
   'SALARIES.READ', 'SALARIES.CREATE', 'SALARIES.UPDATE', 'SALARIES.VOID',
   'AUDIT_LOG.READ',
@@ -649,9 +665,11 @@ check('health, auth, Phase 3 and Phase 4B actions are routed', function () {
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
+    'inventory.create', 'inventory.list', 'inventory.movements', 'inventory.stockIn', 'inventory.stockOut',
     'schoolFees.create', 'schoolFees.get', 'schoolFees.list', 'schoolFees.update',
     'schoolFees.void',
     'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
+    'stationery.create', 'stationery.fulfill', 'stationery.list',
     'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
   ]);
   eq(CONFIG.ACTIONS.HEALTH, 'health');
@@ -1168,9 +1186,11 @@ check('a missing action is rejected with all routed actions', function () {
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
+    'inventory.create', 'inventory.list', 'inventory.movements', 'inventory.stockIn', 'inventory.stockOut',
     'schoolFees.create', 'schoolFees.get', 'schoolFees.list', 'schoolFees.update',
     'schoolFees.void',
     'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
+    'stationery.create', 'stationery.fulfill', 'stationery.list',
     'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
   ]);
 });
@@ -1185,9 +1205,11 @@ check('an unknown action is NOT_FOUND and names what is available', function () 
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
+    'inventory.create', 'inventory.list', 'inventory.movements', 'inventory.stockIn', 'inventory.stockOut',
     'schoolFees.create', 'schoolFees.get', 'schoolFees.list', 'schoolFees.update',
     'schoolFees.void',
     'staff.create', 'staff.deactivate', 'staff.get', 'staff.list', 'staff.update',
+    'stationery.create', 'stationery.fulfill', 'stationery.list',
     'students.create', 'students.get', 'students.list', 'students.update', 'students.withdraw',
   ]);
 });
@@ -2158,7 +2180,7 @@ check('P4A: a role with multiple permissions works', function () {
   var user = apiR.requireAuthentication_();
   eq(apiR.hasPermission_(user, 'STUDENTS.READ'), true);
   eq(apiR.hasPermission_(user, 'SCHOOL_FEES.READ'), true);
-  eq(apiR.hasPermission_(user, 'AUDIT_LOG.READ'), true);
+  eq(apiR.hasPermission_(user, 'SALARIES.VOID'), true);
   eq(apiR.hasPermission_(user, 'STUDENTS.CREATE'), false, 'unmapped permission denies');
 });
 
@@ -4068,14 +4090,513 @@ check('Phase 4B: complete feeding fee lifecycle — create, get, update, void', 
   }
 });
 
-section('Phase boundary (no fake implementations)');
+/* ==========================================================================
+ * Phase 5: Stationery + Inventory
+ * ======================================================================== */
+
+const STATIONERY_HEADERS = ['Transaction_ID', 'Student_ID', 'Item_ID', 'Quantity_Purchased',
+  'Unit_Price', 'Total', 'Amount_Paid', 'Balance', 'Payment_Date', 'Payment_Method',
+  'Reference', 'Fulfillment_Status', 'Quantity_Given', 'Quantity_Remaining',
+  'Given_By', 'Given_Date', 'Recorded_By', 'Notes'];
+
+const INVENTORY_HEADERS = ['Item_ID', 'Item_Name', 'Category', 'Unit', 'Selling_Price',
+  'Current_Quantity', 'Minimum_Stock_Level', 'Status'];
+
+const INVENTORY_MOVEMENT_HEADERS = ['Movement_ID', 'Item_ID', 'Movement_Type', 'Quantity',
+  'Date', 'Reason', 'Recorded_By', 'Notes'];
+
+/** Spreadsheet with seeded Stationery, Inventory, and Inventory_Movements tabs. */
+function p5Spreadsheet(opts) {
+  opts = opts || {};
+  const ss = makeFullSpreadsheet();
+  ss.getSheetByName('Stationery')._rows = opts.stationery || [
+    STATIONERY_HEADERS,
+    ['STN-001', 'STU-1', 'ITM-001', 10, 5, 50, 50, 0,
+      '2025-09-01', 'Cash', 'STN-2025-001', 'Pending', 0, 10, '', '', 'STF-1', ''],
+  ];
+  ss.getSheetByName('Inventory')._rows = opts.inventory || [
+    INVENTORY_HEADERS,
+    ['ITM-001', 'Exercise Book', 'Stationery', 'Piece', 5, 100, 20, 'In Stock'],
+    ['ITM-002', 'Chalk Box', 'Teaching Aids', 'Box', 25, 10, 10, 'Low Stock'],
+    ['ITM-003', 'Whiteboard Marker', 'Stationery', 'Piece', 8, 0, 5, 'Out of Stock'],
+  ];
+  ss.getSheetByName('Inventory_Movements')._rows = opts.movements || [
+    INVENTORY_MOVEMENT_HEADERS,
+    ['MOV-001', 'ITM-001', 'STOCK_IN', 100, '2025-09-01', 'Opening stock', 'STF-1', ''],
+    ['MOV-002', 'ITM-002', 'STOCK_OUT', 5, '2025-09-02', 'Classroom use', 'STF-1', ''],
+  ];
+  return ss;
+}
+
+/** Load Phase 5 backend with seeded sheets and Admin identity by default. */
+function p5Api(opts) {
+  opts = opts || {};
+  const ss = opts.spreadsheet || p5Spreadsheet(opts.fixture);
+  const sandbox = makeSandbox(ss, opts);
+  sandbox.Session.__activeEmail = opts.email === undefined ? 'admin@school.edu' : opts.email;
+  const loaded = loadBackend(sandbox);
+  loaded.__ss = ss;
+  return loaded;
+}
+
+let p5LastApi = null;
+
+function p5InvCol(header, ss) {
+  const rows = (ss || p5LastApi.__ss).getSheetByName('Inventory')._rows;
+  const idx = rows[0].indexOf(header);
+  return rows.slice(1).map(function (row) { return row[idx]; });
+}
+
+function p5MovCol(header, ss) {
+  const rows = (ss || p5LastApi.__ss).getSheetByName('Inventory_Movements')._rows;
+  const idx = rows[0].indexOf(header);
+  return rows.slice(1).map(function (row) { return row[idx]; });
+}
+
+function p5RowCount(tabName, ss) {
+  return (ss || p5LastApi.__ss).getSheetByName(tabName)._rows.length - 1;
+}
+
+/** POST helper mirroring the Phase 4B tests. */
+function p5Post(api, action, payload) {
+  return JSON.parse(api.doPost({
+    parameter: { action: action },
+    postData: { contents: JSON.stringify({ action: action, payload: payload }) }
+  }).getContent());
+}
+
+function p5Get(api, action, params) {
+  return JSON.parse(api.doGet({
+    parameter: Object.assign({ action: action }, params || {})
+  }).getContent());
+}
+
+section('Phase 5: routing');
+
+check('stationery.list is routed', function () {
+  ok(api.listAvailableActions_().indexOf('stationery.list') !== -1);
+});
+check('stationery.create is routed', function () {
+  ok(api.listAvailableActions_().indexOf('stationery.create') !== -1);
+});
+check('stationery.fulfill is routed', function () {
+  ok(api.listAvailableActions_().indexOf('stationery.fulfill') !== -1);
+});
+check('inventory.list is routed', function () {
+  ok(api.listAvailableActions_().indexOf('inventory.list') !== -1);
+});
+check('inventory.create is routed', function () {
+  ok(api.listAvailableActions_().indexOf('inventory.create') !== -1);
+});
+check('inventory.stockIn is routed', function () {
+  ok(api.listAvailableActions_().indexOf('inventory.stockIn') !== -1);
+});
+check('inventory.stockOut is routed', function () {
+  ok(api.listAvailableActions_().indexOf('inventory.stockOut') !== -1);
+});
+check('inventory.movements is routed', function () {
+  ok(api.listAvailableActions_().indexOf('inventory.movements') !== -1);
+});
+
+section('Phase 5: list');
+
+check('stationery.list returns transactions', function () {
+  const api5 = p5Api();
+  const env = p5Get(api5, 'stationery.list');
+  eq(env.success, true);
+  ok(env.data.length >= 1, 'should return at least one transaction');
+  ok(env.data[0].hasOwnProperty('Transaction_ID'), 'records must be header-keyed');
+});
+
+check('inventory.list returns items', function () {
+  const api5 = p5Api();
+  const env = p5Get(api5, 'inventory.list');
+  eq(env.success, true);
+  ok(env.data.length >= 3, 'should return the seeded items');
+  eq(env.data[0].Item_ID, 'ITM-001');
+  ok(env.data[0].hasOwnProperty('Status'), 'Status must be normalised on list');
+});
+
+check('inventory.list can filter by Category', function () {
+  const api5 = p5Api();
+  const env = p5Get(api5, 'inventory.list', { Category: 'Stationery' });
+  eq(env.success, true);
+  ok(env.data.length >= 1, 'should return Stationery-category items');
+  env.data.forEach(function (record) {
+    eq(record.Category, 'Stationery');
+  });
+});
+
+check('inventory.list can filter by Status', function () {
+  const api5 = p5Api();
+  const env = p5Get(api5, 'inventory.list', { Status: 'Out of Stock' });
+  eq(env.success, true);
+  eq(env.data[0].Item_ID, 'ITM-003');
+  eq(env.data[0].Current_Quantity, 0);
+});
+
+check('inventory.list rejects unknown filter fields', function () {
+  const api5 = p5Api();
+  const err = throwsWithCode(function () {
+    api5.handleInventoryList_({ Bogus: 1 });
+  }, ERROR_CODES.VALIDATION_ERROR);
+    eq(err.details.unknownColumns, ['Bogus']);
+});
+
+section('Phase 5: inventory.create');
+
+check('inventory.create stores a server-generated ITM ID and derives Status', function () {
+  const api5 = p5Api();
+  const env = api5.handleInventoryCreate_({
+    Item_Name: 'Board Duster',
+    Category: 'Stationery',
+    Unit: 'Piece',
+    Selling_Price: 12,
+    Current_Quantity: 5,
+    Minimum_Stock_Level: 2,
+  });
+  eq(env.success, true);
+  eq(env.data.Item_ID, 'ITM-004');
+  eq(env.data.Status, 'In Stock');
+  eq(env.data.Selling_Price, 12);
+  const rows = api5.__ss.getSheetByName('Inventory')._rows;
+  eq(rows[4][0], 'ITM-004');
+  eq(rows[4][1], 'Board Duster');
+});
+
+check('inventory.create rejects a client-supplied Item_ID', function () {
+  const api5 = p5Api();
+  const err = throwsWithCode(function () {
+    api5.handleInventoryCreate_({ Item_ID: 'ITM-999', Item_Name: 'Spoofed', Selling_Price: 1 });
+  }, ERROR_CODES.VALIDATION_ERROR);
+  eq(err.details.unknownColumns, ['Item_ID']);
+});
+
+check('inventory.create ignores a client Status and derives it', function () {
+  const api5 = p5Api();
+  const env = api5.handleInventoryCreate_({
+    Item_Name: 'Marker', Selling_Price: 8,
+    Current_Quantity: 0, Minimum_Stock_Level: 5, Status: 'In Stock',
+  });
+  eq(env.data.Status, 'Out of Stock');
+});
+
+check('inventory.create defaults quantities to 0 when omitted', function () {
+  const api5 = p5Api();
+  const env = api5.handleInventoryCreate_({ Item_Name: 'Empty Item', Selling_Price: 0 });
+  eq(env.data.Current_Quantity, 0);
+  eq(env.data.Minimum_Stock_Level, 0);
+  eq(env.data.Status, 'Out of Stock');
+});
+
+check('inventory.create requires Item_Name', function () {
+  const api5 = p5Api();
+  throwsWithCode(function () { api5.handleInventoryCreate_({ Item_Name: '', Selling_Price: 10 }); },
+    ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('inventory.create requires Selling_Price to be numeric and >= 0', function () {
+  const api5 = p5Api();
+  throwsWithCode(function () { api5.handleInventoryCreate_({ Item_Name: 'X' }); },
+    ERROR_CODES.VALIDATION_ERROR);
+  throwsWithCode(function () { api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: 'abc' }); },
+    ERROR_CODES.VALIDATION_ERROR);
+  throwsWithCode(function () { api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: -1 }); },
+    ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('inventory.create rejects negative / fractional Current_Quantity', function () {
+  const api5 = p5Api();
+  eq(throwsWithCode(function () {
+    api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: 5, Current_Quantity: -1 });
+  }, ERROR_CODES.VALIDATION_ERROR).details.field, 'Current_Quantity');
+  throwsWithCode(function () {
+    api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: 5, Current_Quantity: 1.5 });
+  }, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('inventory.create rejects negative / fractional Minimum_Stock_Level', function () {
+  const api5 = p5Api();
+  eq(throwsWithCode(function () {
+    api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: 5, Minimum_Stock_Level: -2 });
+  }, ERROR_CODES.VALIDATION_ERROR).details.field, 'Minimum_Stock_Level');
+  throwsWithCode(function () {
+    api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: 5, Minimum_Stock_Level: 2.5 });
+  }, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('inventory.create rejects unknown fields', function () {
+  const api5 = p5Api();
+  const err = throwsWithCode(function () {
+    api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: 5, Foo: 1 });
+  }, ERROR_CODES.VALIDATION_ERROR);
+  eq(err.details.unknownColumns, ['Foo']);
+});
+
+check('inventory.create fails with CONFLICT when the lock is unavailable', function () {
+  const ss = p5Spreadsheet();
+  const sandbox = makeSandbox(ss, { lockUnavailable: true });
+  sandbox.Session.__activeEmail = 'admin@school.edu';
+  const api5 = loadBackend(sandbox);
+  api5.__ss = ss;
+  throwsWithCode(function () {
+    api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: 5 });
+  }, ERROR_CODES.CONFLICT);
+  eq(ss.getSheetByName('Inventory')._rows.length, 4, 'nothing written without the lock');
+});
+
+check('inventory.create fails safely when the Inventory sheet is missing', function () {
+  const api5 = p5Api({ spreadsheet: p4bSpreadsheetWithoutTab('Inventory') });
+  const err = throwsWithCode(function () {
+    api5.handleInventoryCreate_({ Item_Name: 'X', Selling_Price: 5 });
+  }, ERROR_CODES.SERVER_ERROR);
+  eq(err.details.sheet, 'Inventory');
+});
+
+section('Phase 5: stock operations');
+
+check('inventory.stockIn increases quantity and records a STOCK_IN movement', function () {
+  p5LastApi = p5Api();
+  const env = p5Post(p5LastApi, 'inventory.stockIn', { Item_ID: 'ITM-001', Quantity: 25, Reason: 'Restock' });
+  eq(env.success, true);
+  eq(env.data.Current_Quantity, 125, '100 + 25');
+  eq(env.data.movement.Movement_ID, 'MOV-003');
+  eq(env.data.movement.Movement_Type, 'STOCK_IN');
+  eq(env.data.movement.Quantity, 25);
+  eq(env.data.movement.Recorded_By, 'STF-1');
+  eq(p5RowCount('Inventory_Movements'), 3);
+  eq(p5MovCol('Item_ID')[2], 'ITM-001');
+});
+
+check('inventory.stockIn requires a positive whole Quantity', function () {
+
+  p5LastApi = p5Api();
+
+  var missing = p5Post(p5LastApi, 'inventory.stockIn', {
+    Item_ID: 'ITM-001'
+  });
+
+  eq(missing.success, false);
+  eq(missing.error, ERROR_CODES.VALIDATION_ERROR);
+  eq(missing.details.field, 'Quantity');
+
+  var zero = p5Post(p5LastApi, 'inventory.stockIn', {
+    Item_ID: 'ITM-001',
+    Quantity: 0
+  });
+
+  eq(zero.success, false);
+  eq(zero.error, ERROR_CODES.VALIDATION_ERROR);
+
+  var negative = p5Post(p5LastApi, 'inventory.stockIn', {
+    Item_ID: 'ITM-001',
+    Quantity: -1
+  });
+
+  eq(negative.success, false);
+  eq(negative.error, ERROR_CODES.VALIDATION_ERROR);
+
+  var fractional = p5Post(p5LastApi, 'inventory.stockIn', {
+    Item_ID: 'ITM-001',
+    Quantity: 2.5
+  });
+
+  eq(fractional.success, false);
+  eq(fractional.error, ERROR_CODES.VALIDATION_ERROR);
+
+});
+
+
+check('inventory.stockIn rejects an unknown Item_ID', function () {
+
+  p5LastApi = p5Api();
+
+  var env = p5Post(p5LastApi, 'inventory.stockIn', {
+    Item_ID: 'ITM-404',
+    Quantity: 1
+  });
+
+  eq(env.success, false);
+  eq(env.error, ERROR_CODES.NOT_FOUND);
+
+  eq(
+    p5RowCount('Inventory_Movements'),
+    2,
+    'no movement recorded for a rejected call'
+  );
+
+});
+check('inventory.stockOut decreases quantity and records a STOCK_OUT movement', function () {
+  p5LastApi = p5Api();
+  const env = p5Post(p5LastApi, 'inventory.stockOut', {
+    Item_ID: 'ITM-001', Quantity: 30, Reason: 'Issue to class'
+  });
+  eq(env.success, true);
+  eq(env.data.Current_Quantity, 70);
+  eq(env.data.movement.Movement_Type, 'STOCK_OUT');
+  eq(env.data.movement.Quantity, 30);
+  eq(env.data.movement.Recorded_By, 'STF-1');
+  eq(p5RowCount('Inventory_Movements'), 3);
+  const rows = p5LastApi.__ss.getSheetByName('Inventory')._rows;
+  eq(rows[1][5], 70, 'the item row must be updated in place');
+});
+
+check('inventory.stockOut can never drive Current_Quantity negative', function () {
+
+  p5LastApi = p5Api();
+
+  const env = p5Post(p5LastApi, 'inventory.stockOut', {
+    Item_ID: 'ITM-002',
+    Quantity: 11
+  });
+
+  eq(env.success, false);
+  eq(env.error, ERROR_CODES.VALIDATION_ERROR);
+
+  eq(env.details.available, 10);
+  eq(env.details.requested, 11);
+
+  eq(
+    p5LastApi.__ss.getSheetByName('Inventory')._rows[2][5],
+    10,
+    'quantity untouched'
+  );
+
+  eq(
+    p5RowCount('Inventory_Movements'),
+    2,
+    'no movement recorded'
+  );
+
+});
+
+check('inventory.stockOut may reach exactly zero', function () {
+  p5LastApi = p5Api();
+  const env = p5Post(p5LastApi, 'inventory.stockOut', { Item_ID: 'ITM-002', Quantity: 10 });
+  eq(env.data.Current_Quantity, 0);
+  eq(env.data.item.Status, 'Out of Stock');
+});
+
+check('inventory.stockOut rejects an unknown Item_ID', function () {
+
+  p5LastApi = p5Api();
+
+  const env = p5Post(p5LastApi, 'inventory.stockOut', {
+    Item_ID: 'ITM-404',
+    Quantity: 1
+  });
+
+  eq(env.success, false);
+  eq(env.error, ERROR_CODES.NOT_FOUND);
+
+  eq(p5RowCount('Inventory_Movements'), 2);
+
+});
+
+check('inventory.stockOut writes inside the script lock', function () {
+  p5LastApi = p5Api();
+  const log = observeSheetAccess(p5LastApi, 'Inventory');
+  const env = p5Post(p5LastApi, 'inventory.stockOut', { Item_ID: 'ITM-001', Quantity: 1 });
+  eq(env.success, true);
+  const writes = log.filter(function (e) { return e.op === 'write'; });
+  ok(writes.length >= 1, 'the item row must be written');
+  ok(writes.every(function (w) { return w.depth > 0; }), 'writes happen inside the lock');
+});
+
+section('Phase 5: stationery.fulfill');
+
+const stnItemQty = function (api5, itemId) {
+  const rows = api5.__ss.getSheetByName('Inventory')._rows;
+  const idx = rows[0].indexOf('Current_Quantity');
+  for (var i = 1; i < rows.length; i++) {
+    if (rows[i][0] === itemId) return rows[i][idx];
+  }
+  return undefined;
+};
+
+check('stationery.fulfill reduces inventory and records the movement', function () {
+  p5LastApi = p5Api();
+  const before = stnItemQty(p5LastApi, 'ITM-001');
+  const env = p5Post(p5LastApi, 'stationery.fulfill', { Transaction_ID: 'STN-001', Quantity_Given: 4 });
+  eq(env.success, true);
+  eq(env.message, 'Stationery fulfillment recorded');
+  eq(env.data.Quantity_Given, 4);
+  eq(env.data.Quantity_Remaining, 6, '10 purchased - 4 given');
+  eq(env.data.Fulfillment_Status, 'Partial');
+  eq(env.data.Given_By, 'STF-1', 'given by the authenticated user, not the client');
+  eq(stnItemQty(p5LastApi, 'ITM-001'), before - 4, 'inventory must decrease');
+  const movRows = p5LastApi.__ss.getSheetByName('Inventory_Movements')._rows;
+  eq(movRows.length, 4, 'one movement row appended');
+  const lastMov = movRows[movRows.length - 1];
+  eq(lastMov[2], 'STOCK_OUT');
+  eq(Number(lastMov[3]), 4);
+  eq(lastMov[1], 'ITM-001');
+});
+
+check('stationery.fulfill to completion marks Fulfilled', function () {
+  p5LastApi = p5Api();
+  const env = p5Post(p5LastApi, 'stationery.fulfill', { Transaction_ID: 'STN-001', Quantity_Given: 10 });
+  eq(env.data.Quantity_Given, 10);
+  eq(env.data.Quantity_Remaining, 0);
+  eq(env.data.Fulfillment_Status, 'Fulfilled');
+});
+
+check('stationery.fulfill rejects more than the remaining quantity', function () {
+  p5LastApi = p5Api();
+  const env = p5Post(p5LastApi, 'stationery.fulfill', {
+    Transaction_ID: 'STN-001',
+    Quantity_Given: 11
+  });
+  eq(env.success, false);
+  eq(env.error, ERROR_CODES.VALIDATION_ERROR);
+});
+
+check('stationery.fulfill rejects an unknown transaction', function () {
+  p5LastApi = p5Api();
+  const env = p5Post(p5LastApi, 'stationery.fulfill', {
+    Transaction_ID: 'STN-404',
+    Quantity_Given: 1
+  });
+  eq(env.success, false);
+  eq(env.error, ERROR_CODES.NOT_FOUND);
+});
+
+section('Phase 5: inventory.movements');
+
+check('inventory.movements returns the ledger in sheet order', function () {
+  p5LastApi = p5Api();
+  const env = p5Get(p5LastApi, 'inventory.movements');
+  eq(env.success, true);
+  ok(env.data.length >= 2, 'should return the seeded movements');
+  eq(env.data[0].Movement_ID, 'MOV-001');
+  ok(env.data[0].hasOwnProperty('Recorded_By'));
+});
+
+check('inventory.movements filters by Item_ID', function () {
+  p5LastApi = p5Api();
+  const env = p5Get(p5LastApi, 'inventory.movements', { Item_ID: 'ITM-001' });
+  eq(env.success, true);
+  env.data.forEach(function (m) { eq(m.Item_ID, 'ITM-001'); });
+});
+
+check('inventory.movements filters by Movement_Type', function () {
+  p5LastApi = p5Api();
+  const env = p5Get(p5LastApi, 'inventory.movements', { Movement_Type: 'STOCK_OUT' });
+  eq(env.success, true);
+  env.data.forEach(function (m) { eq(m.Movement_Type, 'STOCK_OUT'); });
+});
+
+check('inventory.movements rejects unknown filter fields', function () {
+  p5LastApi = p5Api();
+  throwsWithCode(function () {
+    api.handleInventoryMovements_({ Bogus: 1 });
+  }, ERROR_CODES.VALIDATION_ERROR);
+});
+
+section('Phase 5: permission enforcement');
 
 check('every reserved (unimplemented) action still reports NOT_FOUND', function () {
   [
-    'stationery.fulfill',
-    'inventory.stockIn',
-    'inventory.stockOut',
-    'inventory.movements',
     'salaries.list',
     'delegations.list',
     'audit.list',
@@ -4088,13 +4609,15 @@ check('every reserved (unimplemented) action still reports NOT_FOUND', function 
 });
 
 check('Phase 4B fee modules are implemented, later modules still placeholders', function () {
-  // Phase 4B: implemented.
-  ['SchoolFees.js', 'FeedingFees.js'].forEach(function (file) {
+     // Phase 4B: implemented.
+  ['SchoolFees.js', 'FeedingFees.js',
+   // Phase 5: now implemented.
+   'Stationery.js', 'Inventory.js'].forEach(function (file) {
     const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
     ok(!/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' should be implemented in Phase 4B');
   });
-  // Phase 5-7 stubs are still untouched placeholders.
-  ['Stationery.js', 'Inventory.js', 'Salaries.js',
+    // Phase 5-7 stubs are still untouched placeholders.
+  ['Salaries.js',
    'Delegations.js', 'Dashboard.js', 'Audit.js'].forEach(function (file) {
     const code = stripComments(fs.readFileSync(path.join(ROOT, file), 'utf8'));
     ok(/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()), file + ' is no longer an untouched placeholder');

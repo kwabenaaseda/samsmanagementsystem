@@ -211,6 +211,16 @@ function readAll_(name) {
  */
 function withScriptLock_(fn) {
   const lock = LockService.getScriptLock();
+
+  // Re-entrant: if this execution already holds the lock, keep using it
+  // (Apps Script script locks are not re-entrant, so a second tryLock()
+  // would fail with "already locked"). Analagous to withInventoryLock_()
+  // in Inventory.js, which exists specifically so Stationery → Inventory
+  // nested calls do not deadlock.
+  if (typeof lock.hasLock === 'function' && lock.hasLock()) {
+    return fn();
+  }
+
   const acquired = lock.tryLock(CONFIG.LOCK_TIMEOUT_MS);
   if (!acquired) {
     throwError_(

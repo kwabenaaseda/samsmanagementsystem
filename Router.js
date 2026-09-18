@@ -78,7 +78,15 @@ function getRoutes_() {
   routes[CONFIG.ACTIONS.FEEDING_FEES.GET] = handleFeedingFeesGet_;
   routes[CONFIG.ACTIONS.FEEDING_FEES.CREATE] = handleFeedingFeesCreate_;
   routes[CONFIG.ACTIONS.FEEDING_FEES.UPDATE] = handleFeedingFeesUpdate_;
-  routes[CONFIG.ACTIONS.FEEDING_FEES.VOID] = handleFeedingFeesVoid_;
+    routes[CONFIG.ACTIONS.FEEDING_FEES.VOID] = handleFeedingFeesVoid_;
+  routes[CONFIG.ACTIONS.STATIONERY.LIST] = handleStationeryList_;
+  routes[CONFIG.ACTIONS.STATIONERY.CREATE] = handleStationeryCreate_;
+  routes[CONFIG.ACTIONS.STATIONERY.FULFILL] = handleStationeryFulfill_;
+  routes[CONFIG.ACTIONS.INVENTORY.LIST] = handleInventoryList_;
+  routes[CONFIG.ACTIONS.INVENTORY.CREATE] = handleInventoryCreate_;
+  routes[CONFIG.ACTIONS.INVENTORY.STOCK_IN] = handleInventoryStockIn_;
+  routes[CONFIG.ACTIONS.INVENTORY.STOCK_OUT] = handleInventoryStockOut_;
+  routes[CONFIG.ACTIONS.INVENTORY.MOVEMENTS] = handleInventoryMovements_;
   return routes;
 }
 
