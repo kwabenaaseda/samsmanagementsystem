@@ -6,7 +6,8 @@
  * SCHEMA ASSUMPTIONS:
  *   Students: Status column exists (ACTIVE / WITHDRAWN / ...)
  *   Staff: Employment_Status column exists (ACTIVE / INACTIVE / ...)
- *   School_Fees: Amount_Paid column exists
+ *   School_Fees: fee obligation rows (Amount_Due = Fee Amount)
+ *   School_Fee_Payments: payment ledger (Amount, Status, Fee_ID → School_Fees)
  *   Feeding_Fees: Amount_Paid column exists
  *   Inventory: Status column exists (derived from Current_Quantity vs Minimum_Stock_Level)
  *
@@ -86,6 +87,35 @@ function sumColumn_(sheetName, column) {
 }
 
 /**
+ * Sum the Amount column across NON-VOIDED School_Fee_Payments rows.
+ * This is "money actually received" — fee obligations are never counted.
+ * An absent payments sheet (fresh deployment) counts as zero collected.
+ * @return {number}
+ */
+function sumSchoolFeePayments_() {
+  try {
+    var sheet = getSheet_(CONFIG.SHEETS.SCHOOL_FEE_PAYMENTS);
+  } catch (err) {
+    // Missing tab: no payments recorded yet, not a service failure.
+    return 0;
+  }
+  var headers = getHeaders_(sheet);
+  var amountIdx = headers.indexOf('Amount');
+  var statusIdx = headers.indexOf('Status');
+  if (amountIdx === -1) return 0;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+  var values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  var total = 0;
+  for (var i = 0; i < values.length; i++) {
+    if (statusIdx !== -1 && toTrimmedString_(values[i][statusIdx]) === 'Voided') continue;
+    var n = Number(values[i][amountIdx]);
+    if (!isNaN(n)) total += n;
+  }
+  return total;
+}
+
+/**
  * Count rows where the Status column does NOT equal 'In Stock'.
  * Used to report low / out-of-stock items for the dashboard.
  * @param {string} sheetName
@@ -113,32 +143,47 @@ function countNonInStock_(sheetName) {
  * @return {{type: string, Payment_ID: string, Student_ID: string, Amount_Paid: number, Payment_Date: string}[]}
  */
 function recentPayments_(schoolFeesSheetName, feedingFeesSheetName) {
-  var sfSheet = getSheet_(schoolFeesSheetName);
   var ffSheet = getSheet_(feedingFeesSheetName);
 
-  var sfHeaders = getHeaders_(sfSheet);
   var ffHeaders = getHeaders_(ffSheet);
 
-  var sfLastRow = sfSheet.getLastRow();
   var ffLastRow = ffSheet.getLastRow();
 
   var all = [];
 
-  // School_Fees rows
-  if (sfLastRow >= 2 && sfHeaders.length > 0) {
-    var sfValues = sfSheet.getRange(2, 1, sfLastRow - 1, sfHeaders.length).getValues();
-    for (var i = 0; i < sfValues.length; i++) {
-      var row = sfValues[i];
-      if (isBlankRow_(row)) continue;
-      var rec = rowToObject_(sfHeaders, row);
-      all.push({
-        type: 'schoolFees',
-        Payment_ID: toTrimmedString_(rec.Payment_ID),
-        Student_ID: toTrimmedString_(rec.Student_ID),
-        Amount_Paid: Number(rec.Amount_Paid) || 0,
-        Payment_Date: toTrimmedString_(rec.Payment_Date)
-      });
+  // School fee PAYMENTS (transactions). Student_ID is resolved through the
+  // referenced fee obligation, so the ledger stays free of duplicated data.
+  try {
+    var fpSheet = getSheet_(CONFIG.SHEETS.SCHOOL_FEE_PAYMENTS);
+    var fpHeaders = getHeaders_(fpSheet);
+    var fpLastRow = fpSheet.getLastRow();
+    if (fpLastRow >= 2 && fpHeaders.length > 0) {
+      var feeIdIdx = fpHeaders.indexOf('Fee_ID');
+      if (feeIdIdx !== -1) {
+        var fpValues = fpSheet.getRange(2, 1, fpLastRow - 1, fpHeaders.length).getValues();
+        var feeStudent = {};
+        for (var k = 0; k < fpValues.length; k++) {
+          var fpRec = rowToObject_(fpHeaders, fpValues[k]);
+          if (toTrimmedString_(fpRec.Status) === 'Voided') continue;
+          var feeRow = findRowById_(
+            CONFIG.SHEETS.SCHOOL_FEES,
+            toTrimmedString_(fpRec.Fee_ID),
+            'Payment_ID'
+          );
+          var sid = feeRow ? toTrimmedString_(feeRow.record.Student_ID) : '';
+          feeStudent[toTrimmedString_(fpRec.Payment_ID)] = sid;
+          all.push({
+            type: 'schoolFees',
+            Payment_ID: toTrimmedString_(fpRec.Payment_ID),
+            Student_ID: sid,
+            Amount_Paid: Number(fpRec.Amount) || 0,
+            Payment_Date: toTrimmedString_(fpRec.Payment_Date)
+          });
+        }
+      }
     }
+  } catch (errPayments) {
+    // Missing School_Fee_Payments tab: skip school-fee payments gracefully.
   }
 
   // Feeding_Fees rows
@@ -191,7 +236,7 @@ function handleDashboardSummary_(payload, request) {
 
   var activeStudents = countWhere_(CONFIG.SHEETS.STUDENTS, 'Status', CONFIG.STUDENT_STATUS.ACTIVE);
   var activeStaff = countWhere_(CONFIG.SHEETS.STAFF, 'Employment_Status', CONFIG.STAFF_STATUS.ACTIVE);
-  var schoolFeesCollected = sumColumn_(CONFIG.SHEETS.SCHOOL_FEES, 'Amount_Paid');
+  var schoolFeesCollected = sumSchoolFeePayments_();
   var feedingFeesCollected = sumColumn_(CONFIG.SHEETS.FEEDING_FEES, 'Amount_Paid');
   var lowStockItems = countNonInStock_(CONFIG.SHEETS.INVENTORY);
   var recentPayments = recentPayments_(CONFIG.SHEETS.SCHOOL_FEES, CONFIG.SHEETS.FEEDING_FEES);

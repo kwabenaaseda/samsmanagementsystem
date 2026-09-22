@@ -298,7 +298,7 @@ function hasPermission_(userContext, permission) {
   if (typeof permission !== 'string' || !/^[A-Z][A-Z0-9_]*\.[A-Z][A-Z0-9_]*$/.test(permission)) {
     return false;
   }
-  var grants = resolveRolePermissions_(normalizeRoleKey_(userContext.role));
+  var grants = resolveRolePermissions_(userContext.role);
   for (var i = 0; i < grants.length; i++) {
     if (grants[i] === '*') return true;
     if (grants[i] === permission) return true;

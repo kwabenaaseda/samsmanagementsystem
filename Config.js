@@ -36,6 +36,7 @@ const CONFIG = {
     PERMISSIONS: 'Permissions',
     ROLE_PERMISSIONS: 'Role_Permissions',
     SCHOOL_FEES: 'School_Fees',
+    SCHOOL_FEE_PAYMENTS: 'School_Fee_Payments',
     FEEDING_FEES: 'Feeding_Fees',
     STATIONERY: 'Stationery',
     INVENTORY: 'Inventory',
@@ -172,7 +173,17 @@ const CONFIG = {
       GET: 'schoolFees.get',
       CREATE: 'schoolFees.create',
       UPDATE: 'schoolFees.update',
-      VOID: 'schoolFees.void'
+      VOID: 'schoolFees.void',
+      /**
+       * Payment transactions against a fee obligation. One School_Fees row is
+       * a fee ACCOUNT (obligation); each payment is its own row here, so
+       * multiple payments against one obligation never create new obligations.
+       */
+      PAYMENTS: {
+        LIST: 'feePayments.list',
+        CREATE: 'feePayments.create',
+        VOID: 'feePayments.void'
+      }
     },
     FEEDING_FEES: {
       LIST: 'feedingFees.list',

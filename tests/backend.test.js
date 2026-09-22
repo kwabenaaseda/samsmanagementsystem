@@ -29,6 +29,7 @@ const BACKEND_FILES = [
   'Students.js',
   'Staff.js',
   'SchoolFees.js',
+  'SchoolFeePayments.js',
   'FeedingFees.js',
   'Stationery.js',
   'Inventory.js',
@@ -400,7 +401,7 @@ function readEnvelope(textOutput) {
   return JSON.parse(textOutput.getContent());
 }
 
-/** The 13 logical tabs Config.js is expected to declare. */
+/** The 15 logical tabs Config.js is expected to declare. */
 const EXPECTED_TABS = [
   'Students',
   'Staff',
@@ -409,6 +410,7 @@ const EXPECTED_TABS = [
   'Permissions',
   'Role_Permissions',
   'School_Fees',
+  'School_Fee_Payments',
   'Feeding_Fees',
   'Stationery',
   'Inventory',
@@ -547,6 +549,20 @@ function makeFullSpreadsheet() {
       '2025-09-15', 'Cash', 'SF-2025-T1-003', 'Unpaid', 'STF-1',
       'Not yet paid'],
   ];
+  // The payment LEDGER (School_Fee_Payments). Amount_Paid/Balance on the
+  // School_Fees rows are server-derived from these non-voided rows, so the
+  // ledger is seeded to mirror the legacy paid figures (SF-001: 1200 paid,
+  // SF-002: 600 paid, SF-003: nothing paid yet).
+  const schoolFeePaymentsIdx = EXPECTED_TABS.indexOf('School_Fee_Payments');
+  const schoolFeePayments = sheets[schoolFeePaymentsIdx];
+  schoolFeePayments._rows = [
+    ['Payment_ID', 'Fee_ID', 'Amount', 'Payment_Method', 'Payment_Date',
+      'Reference', 'Recorded_By', 'Status', 'Notes'],
+    ['FFP-001', 'SF-001', 1200, 'Bank Transfer', '2025-09-15',
+      'SF-2025-T1-001', 'STF-1', 'Paid', ''],
+    ['FFP-002', 'SF-002', 600, 'Mobile Money', '2025-12-10',
+      'SF-2025-T2-002', 'STF-1', 'Paid', ''],
+  ];
   const feedingFeesIdx = EXPECTED_TABS.indexOf('Feeding_Fees');
   const feedingFees = sheets[feedingFeesIdx];
   feedingFees._rows = [
@@ -684,6 +700,7 @@ check('health, auth, Phase 3, Phase 4B and dashboard actions are routed', functi
   eq(api.listAvailableActions_().sort(), [
     'auth.check', 'auth.me',
     'dashboard.summary',
+    'feePayments.create', 'feePayments.list', 'feePayments.void',
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
@@ -707,8 +724,16 @@ check('all reserved action names follow the module.verb convention', function ()
       flat.push(value);
       return;
     }
+    // Groups may nest one more level (e.g. SCHOOL_FEES.PAYMENTS.*).
     Object.keys(value).forEach(function (key) {
-      flat.push(value[key]);
+      const inner = value[key];
+      if (typeof inner === 'string') {
+        flat.push(inner);
+        return;
+      }
+      Object.keys(inner).forEach(function (innerKey) {
+        flat.push(inner[innerKey]);
+      });
     });
   });
 
@@ -1254,6 +1279,7 @@ check('a missing action is rejected with all routed actions', function () {
   eq(envelope.details.availableActions.sort(), [
     'auth.check', 'auth.me',
     'dashboard.summary',
+    'feePayments.create', 'feePayments.list', 'feePayments.void',
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
@@ -1274,6 +1300,7 @@ check('an unknown action is NOT_FOUND and names what is available', function () 
   eq(envelope.details.availableActions.sort(), [
     'auth.check', 'auth.me',
     'dashboard.summary',
+    'feePayments.create', 'feePayments.list', 'feePayments.void',
     'feedingFees.create', 'feedingFees.get', 'feedingFees.list', 'feedingFees.update',
     'feedingFees.void',
     'health',
@@ -2529,14 +2556,21 @@ check('P4A: auth.check resolves allowed and denied through the mapping', functio
  * Phase 4B fixtures
  * ------------------------------------------------------------------------ */
 
-/** Valid school fee create payload; `overrides` replaces or adds fields. */
+/** Valid school fee ACCOUNT create payload; `overrides` replaces or adds fields. */
 function sfCreatePayload(overrides) {
   return Object.assign({
     Student_ID: 'STU-2',
     Academic_Year: '2025/2026',
     Term: 'Term 1',
     Amount_Due: 1000,
-    Amount_Paid: 0,
+  }, overrides || {});
+}
+
+/** Valid fee PAYMENT create payload against an existing fee account. */
+function fpCreatePayload(overrides) {
+  return Object.assign({
+    Fee_ID: 'SF-003',
+    Amount: 200,
     Payment_Method: 'Cash',
     Payment_Date: '2025-09-20',
   }, overrides || {});
@@ -2705,9 +2739,6 @@ check('schoolFees.create: admin can create a school fee payment with server-gene
     Academic_Year: '2025/2026',
     Term: 'Term 1',
     Amount_Due: 1500,
-    Amount_Paid: 0,
-    Payment_Method: 'Cash',
-    Payment_Date: '2025-09-20',
     Reference: 'TEST-001',
     Notes: 'Test payment'
   };
@@ -2758,9 +2789,6 @@ check('schoolFees.create: client-supplied Balance is ignored and recalculated', 
     Academic_Year: '2025/2026',
     Term: 'Term 1',
     Amount_Due: 2000,
-    Amount_Paid: 500,
-    Payment_Method: 'Mobile Money',
-    Payment_Date: '2025-09-20',
     Balance: 9999
   };
   const env = JSON.parse(apiA.doPost({
@@ -2769,7 +2797,8 @@ check('schoolFees.create: client-supplied Balance is ignored and recalculated', 
   }).getContent());
   ok(env.success, 'create should succeed: ' + (env.message || env.error));
   if (env.success) {
-    eq(env.data.Balance, 1500, 'Balance must be recalculated as Amount_Due - Amount_Paid');
+    eq(env.data.Amount_Paid, 0, 'a new fee account has received no money yet');
+    eq(env.data.Balance, 2000, 'Outstanding starts at the Fee Amount');
   }
 });
 
@@ -2997,7 +3026,7 @@ check('schoolFees.create: non-numeric or negative amounts are rejected', functio
 
 check('schoolFees.create: every required field is enforced', function () {
   const apiA = loadBackendAs('admin@school.edu');
-  ['Amount_Due', 'Amount_Paid', 'Payment_Method', 'Payment_Date'].forEach(function (field) {
+  ['Student_ID', 'Academic_Year', 'Term', 'Amount_Due'].forEach(function (field) {
     const env = doPostEnvelope(apiA, 'schoolFees.create', payloadWithout(sfCreatePayload(), field));
     eq(env.success, false, field + ' is required');
     eq(env.error, 'VALIDATION_ERROR');
@@ -3146,7 +3175,7 @@ section('Phase 4B: School Fees — update');
 
 check('schoolFees.update performs a partial update and recalculates Balance', function () {
   const apiA = loadBackendAs('admin@school.edu');
-  const payload = { Payment_ID: 'SF-003', Amount_Paid: 600 };
+  const payload = { Payment_ID: 'SF-003', Amount_Due: 600 };
   const env = JSON.parse(apiA.doPost({
     parameter: { action: 'schoolFees.update' },
     postData: { contents: JSON.stringify({ action: 'schoolFees.update', payload: payload }) }
@@ -3154,8 +3183,9 @@ check('schoolFees.update performs a partial update and recalculates Balance', fu
   eq(env.success, true, env.message || env.error);
   if (env.success) {
     eq(env.data.Payment_ID, 'SF-003');
-    eq(env.data.Amount_Paid, 600);
-    eq(env.data.Balance, 600, 'Balance should be recalculated');
+    eq(env.data.Amount_Due, 600, 'Fee Amount must be editable');
+    eq(env.data.Amount_Paid, 0, 'Total Paid is server-derived from the ledger');
+    eq(env.data.Balance, 600, 'Outstanding must be recalculated');
     eq(env.data.Status, 'Partial');
   }
 });
@@ -4023,9 +4053,9 @@ check('Phase 4B: schoolFees.update decides and writes inside the script lock', f
   const row = feeRowOf(ss, 'School_Fees', 'SF-003');
   const log = observeSheetAccess(apiA, 'School_Fees');
 
-  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-003', Amount_Paid: 1200 });
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-003', Amount_Due: 600 });
   eq(env.success, true, 'the update should succeed');
-  eq(env.data.Status, 'Paid', 'paying the balance in full must recalculate the status');
+  eq(env.data.Status, 'Partial', 'the recalculated status must be derived from the ledger');
   eq(apiA.__lockDepth, 0, 'the critical section must be released before the response is returned');
 
   const reads = fullRowReads(log, row);
@@ -4035,12 +4065,12 @@ check('Phase 4B: schoolFees.update decides and writes inside the script lock', f
   });
   eq(reads[0].values[0][statusCol], 'Unpaid',
     'the deciding read must be the stored pre-update row (Unpaid), read under the lock');
-  eq(reads[1].values[0][statusCol], 'Paid', 'the refresh read must see the recalculated status');
+  eq(reads[1].values[0][statusCol], 'Partial', 'the refresh read must see the recalculated status');
 
   const writes = log.filter(function (entry) { return entry.op === 'write'; });
   eq(writes.length, 1, 'the update must write the row exactly once');
   ok(writes[0].depth > 0, 'the row write must happen inside the critical section');
-  eq(writes[0].values[0][statusCol], 'Paid');
+  eq(writes[0].values[0][statusCol], 'Partial');
 });
 
 check('Phase 4B: schoolFees.void decides inside the script lock', function () {
@@ -4186,18 +4216,195 @@ check('Phase 4B: feedingFees.update is serialized against a void racing the lock
 });
 
 
+section('Option 2: fee payment transactions (School_Fee_Payments)');
+
+check('feePayments.create records a payment and recomputes the account', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  // SF-003: Fee 1200, nothing paid yet.
+  const env = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Amount: 800 }));
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    ok(env.data.payment.Payment_ID.indexOf('FFP-') === 0, 'ledger IDs use the FFP- prefix');
+    eq(env.data.payment.Status, 'Paid');
+    eq(env.data.payment.Recorded_By, 'STF-1', 'Recorded_By is the authenticated user');
+    eq(env.data.account.Amount_Paid, 800, 'Total Paid comes from the ledger');
+    eq(env.data.account.Balance, 400, 'Outstanding = Fee Amount - Total Paid');
+    eq(env.data.account.Status, 'Partial');
+  }
+});
+
+check('feePayments.create: a second payment does NOT create a second obligation', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const first = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Amount: 800 }));
+  eq(first.success, true, first.message || first.error);
+  const second = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Amount: 400 }));
+  eq(second.success, true, second.message || second.error);
+  eq(second.data.account.Amount_Paid, 1200);
+  eq(second.data.account.Balance, 0);
+  eq(second.data.account.Status, 'Paid');
+  eq(feeIds(ss, 'School_Fees'), ['SF-001', 'SF-002', 'SF-003'],
+    'two payments against one obligation must NOT create a second obligation row');
+  const ledgerIds = ss.getSheetByName('School_Fee_Payments')._rows.slice(1).map(function (r) { return r[0]; });
+  eq(ledgerIds, ['FFP-001', 'FFP-002', 'FFP-003', 'FFP-004'],
+    'each payment appends exactly one ledger row');
+});
+
+check('feePayments.create: overpayment is rejected for MVP1', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  // SF-001 already has 1200 paid against a 1200 fee: outstanding is 0.
+  const env = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Fee_ID: 'SF-001', Amount: 200 }));
+  eq(env.success, false, 'Amount > Outstanding must be rejected');
+  eq(env.error, 'VALIDATION_ERROR');
+  eq(env.details.reason, 'payment-exceeds-outstanding');
+});
+
+check('feePayments.create: non-positive amounts are rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  [[0], [-100], ['abc']].forEach(function (amount) {
+    const env = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Amount: amount[0] }));
+    eq(env.success, false, 'Amount=' + amount[0] + ' must be rejected');
+    eq(env.error, 'VALIDATION_ERROR');
+  });
+});
+
+check('feePayments.create: invalid Payment_Method is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Payment_Method: 'Barter' }));
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  ok(env.details.allowedValues.indexOf('Cash') !== -1, 'allowed values come from the backend contract');
+});
+
+check('feePayments.create: unknown Fee_ID is NOT_FOUND', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Fee_ID: 'SF-999' }));
+  eq(env.success, false);
+  eq(env.error, 'NOT_FOUND');
+});
+
+check('feePayments.list returns the ledger and server-derived account totals', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doGetEnvelope(apiA, { action: 'feePayments.list', Fee_ID: 'SF-002' });
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.payments.length, 1);
+    eq(env.data.payments[0].Payment_ID, 'FFP-002');
+    eq(env.data.account.Fee_Amount, 1200);
+    eq(env.data.account.Total_Paid, 600);
+    eq(env.data.account.Outstanding, 600);
+    eq(env.data.account.Status, 'Partial');
+    eq(env.data.account.Student_ID, 'STU-1');
+  }
+});
+
+section('Option 2: fee payment void + fee amount edits');
+
+check('feePayments.void preserves the row and restores the outstanding', function () {
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  const before = ss.getSheetByName('School_Fee_Payments')._rows.length;
+  const env = doPostEnvelope(apiA, 'feePayments.void', { Payment_ID: 'FFP-002' });
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.payment.Status, 'Voided', 'the payment row is kept, only voided');
+    eq(env.data.account.Total_Paid, 0, 'voided payments no longer count toward Total Paid');
+    eq(env.data.account.Outstanding, 1200, 'the fee obligation returns to fully outstanding');
+    eq(env.data.account.Status, 'Unpaid');
+  }
+  eq(ss.getSheetByName('School_Fee_Payments')._rows.length, before,
+    'void must never delete a ledger row');
+  eq(ss.getSheetByName('School_Fee_Payments')._rows[2][7], 'Voided',
+    'the stored row carries the Voided status');
+});
+
+check('feePayments.void: a second void is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const first = doPostEnvelope(apiA, 'feePayments.void', { Payment_ID: 'FFP-002' });
+  eq(first.success, true, first.message || first.error);
+  const second = doPostEnvelope(apiA, 'feePayments.void', { Payment_ID: 'FFP-002' });
+  eq(second.success, false, 're-voiding must be refused');
+  eq(second.error, 'VALIDATION_ERROR');
+  eq(second.details.reason, 'already-voided');
+});
+
+check('schoolFees.update: Fee Amount below Total Paid is rejected', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  // SF-002 has 600 paid from the ledger; reducing the fee to 500 would corrupt it.
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-002', Amount_Due: 500 });
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  eq(env.details.reason, 'fee-below-total-paid');
+  const after = apiA.findSchoolFeeById_('SF-002').record;
+  eq(after.Amount_Due, 1200, 'the rejected change must not be applied');
+});
+
+check('schoolFees.update: increasing the Fee Amount recomputes Outstanding only', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-002', Amount_Due: 1500 });
+  eq(env.success, true, env.message || env.error);
+  if (env.success) {
+    eq(env.data.Amount_Due, 1500, 'the fee obligation may grow');
+    eq(env.data.Amount_Paid, 600, 'payment history is untouched');
+    eq(env.data.Balance, 900, 'Outstanding = new Fee Amount - Total Paid');
+    eq(env.data.Status, 'Partial');
+  }
+  const ledger = apiA.findRowById_('School_Fee_Payments', 'FFP-002', 'Payment_ID');
+  eq(ledger.record.Amount, 600, 'the ledger row itself never changes');
+});
+
+check('schoolFees.update: client-supplied Amount_Paid is rejected as server-derived', function () {
+  const apiA = loadBackendAs('admin@school.edu');
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-003', Amount_Paid: 999 });
+  eq(env.success, false);
+  eq(env.error, 'VALIDATION_ERROR');
+  eq(env.details.reason, 'server-derived-field');
+});
+
+check('feePayments.write respects the script lock', function () {
+  const ss = makeFullSpreadsheet();
+  const apiLocked = loadBackendAs('admin@school.edu', ss, { lockUnavailable: true });
+  const create = doPostEnvelope(apiLocked, 'feePayments.create', fpCreatePayload());
+  eq(create.success, false, 'feePayments.create must not write without the script lock');
+  eq(create.error, ERROR_CODES.CONFLICT);
+  const voidEnv = doPostEnvelope(apiLocked, 'feePayments.void', { Payment_ID: 'FFP-001' });
+  eq(voidEnv.success, false, 'feePayments.void must not write without the script lock');
+  eq(voidEnv.error, ERROR_CODES.CONFLICT);
+  const ledgerIds = ss.getSheetByName('School_Fee_Payments')._rows.slice(1).map(function (r) { return r[0]; });
+  eq(ledgerIds, ['FFP-001', 'FFP-002'], 'the ledger must be untouched');
+  eq(apiLocked.findSchoolFeeById_('SF-003').record.Amount_Paid, 0, 'no account aggregate may change');
+});
+
+check('feePayments permission gates mirror the SCHOOL_FEES codes', function () {
+  const apiDenied = loadBackendAs('teacher@school.edu');
+  const create = doPostEnvelope(apiDenied, 'feePayments.create', fpCreatePayload());
+  eq(create.success, false, 'Teacher has no SCHOOL_FEES.CREATE');
+  eq(create.error, 'FORBIDDEN');
+  const list = doGetEnvelope(apiDenied, { action: 'feePayments.list', Fee_ID: 'SF-003' });
+  eq(list.success, false, 'Teacher has no SCHOOL_FEES.READ');
+  eq(list.error, 'FORBIDDEN');
+  const voidEnv = doPostEnvelope(apiDenied, 'feePayments.void', { Payment_ID: 'FFP-001' });
+  eq(voidEnv.success, false, 'Teacher has no SCHOOL_FEES.VOID');
+  eq(voidEnv.error, 'FORBIDDEN');
+});
+
+check('SchoolFeePayments.js is implemented (not a placeholder stub)', function () {
+  const code = stripComments(fs.readFileSync(path.join(ROOT, 'SchoolFeePayments.js'), 'utf8'));
+  ok(!/^function myFunction\(\)\s*\{\s*\}$/.test(code.trim()),
+    'SchoolFeePayments.js should be implemented');
+});
+
 section('Phase 4B: Full lifecycle integration');
 
 check('Phase 4B: complete school fee lifecycle — create, get, update, void', function () {
-  const apiA = loadBackendAs('admin@school.edu');
+  const ss = makeFullSpreadsheet();
+  const apiA = loadBackendAs('admin@school.edu', ss);
+  // Step 1: create the fee OBLIGATION for STU-1 Term 3.
   const createPayload = {
     Student_ID: 'STU-1',
     Academic_Year: '2025/2026',
     Term: 'Term 3',
     Amount_Due: 2000,
-    Amount_Paid: 1000,
-    Payment_Method: 'Bank Transfer',
-    Payment_Date: '2025-09-01',
     Reference: 'LIFECYCLE-TEST-SF-001',
     Notes: 'Lifecycle test'
   };
@@ -4210,8 +4417,9 @@ check('Phase 4B: complete school fee lifecycle — create, get, update, void', f
     const newId = createEnv.data.Payment_ID;
     ok(newId.indexOf('SF-') === 0, 'should have SF- prefix: ' + newId);
     eq(createEnv.data.Student_ID, 'STU-1');
-    eq(createEnv.data.Balance, 1000);
-    eq(createEnv.data.Status, 'Partial');
+    eq(createEnv.data.Amount_Paid, 0);
+    eq(createEnv.data.Balance, 2000, 'a new obligation starts fully outstanding');
+    eq(createEnv.data.Status, 'Unpaid');
     eq(createEnv.data.Recorded_By, 'STF-1');
 
     const getEnv = JSON.parse(apiA.doGet({
@@ -4220,19 +4428,55 @@ check('Phase 4B: complete school fee lifecycle — create, get, update, void', f
     eq(getEnv.success, true);
     if (getEnv.success) {
       eq(getEnv.data.Payment_ID, newId);
-      eq(getEnv.data.Balance, 1000);
+      eq(getEnv.data.Balance, 2000);
     }
 
-    const updateEnv = JSON.parse(apiA.doPost({
-      parameter: { action: 'schoolFees.update' },
-      postData: { contents: JSON.stringify({ action: 'schoolFees.update', payload: { Payment_ID: newId, Amount_Paid: 2000 } }) }
-    }).getContent());
-    eq(updateEnv.success, true);
-    if (updateEnv.success) {
-      eq(updateEnv.data.Balance, 0);
-      eq(updateEnv.data.Status, 'Paid');
-    }
+    // Step 2: record the FIRST payment (1000) against the obligation.
+    const pay1 = doPostEnvelope(apiA, 'feePayments.create', {
+      Fee_ID: newId, Amount: 1000, Payment_Method: 'Bank Transfer', Payment_Date: '2025-09-01'
+    });
+    eq(pay1.success, true, pay1.message || pay1.error);
+    eq(pay1.data.payment.Fee_ID, newId);
+    eq(pay1.data.account.Amount_Paid, 1000);
+    eq(pay1.data.account.Balance, 1000);
+    eq(pay1.data.account.Status, 'Partial');
 
+    // Step 3: record the SECOND payment (1000) — NO new obligation is created.
+    const pay2 = doPostEnvelope(apiA, 'feePayments.create', {
+      Fee_ID: newId, Amount: 1000, Payment_Method: 'Cash', Payment_Date: '2025-09-20'
+    });
+    eq(pay2.success, true, pay2.message || pay2.error);
+    eq(pay2.data.account.Amount_Paid, 2000);
+    eq(pay2.data.account.Balance, 0);
+    eq(pay2.data.account.Status, 'Paid');
+    const feeIdsAfterPayments = feeIds(ss, 'School_Fees');
+    ok(feeIdsAfterPayments.indexOf(newId) !== -1, 'the obligation stays where it was');
+    eq(feeIdsAfterPayments.filter(function (id) { return id === newId; }).length, 1,
+      'two payments against one obligation must NOT create a second obligation row');
+
+    // Step 4: a payment exceeding the outstanding is REJECTED.
+    const overpay = doPostEnvelope(apiA, 'feePayments.create', {
+      Fee_ID: newId, Amount: 500, Payment_Method: 'Cash', Payment_Date: '2025-09-21'
+    });
+    eq(overpay.success, false, 'Amount > Outstanding must be rejected');
+    eq(overpay.error, 'VALIDATION_ERROR');
+
+    // Step 5: increase the Fee Amount; Outstanding is recomputed, payment
+    // history untouched.
+    const increase = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: newId, Amount_Due: 2200 });
+    eq(increase.success, true, increase.message || increase.error);
+    eq(increase.data.Amount_Due, 2200);
+    eq(increase.data.Amount_Paid, 2000);
+    eq(increase.data.Balance, 200);
+
+    // Step 6: void the first payment; it is preserved but excluded from Total Paid.
+    const voidPayment = doPostEnvelope(apiA, 'feePayments.void', { Payment_ID: pay1.data.payment.Payment_ID });
+    eq(voidPayment.success, true, voidPayment.message || voidPayment.error);
+    eq(voidPayment.data.payment.Status, 'Voided');
+    eq(voidPayment.data.account.Amount_Paid, 1000);
+    eq(voidPayment.data.account.Balance, 1200);
+
+    // Step 7: void the obligation itself (soft correction).
     const voidEnv = JSON.parse(apiA.doPost({
       parameter: { action: 'schoolFees.void' },
       postData: { contents: JSON.stringify({ action: 'schoolFees.void', payload: { Payment_ID: newId } }) }
@@ -4877,11 +5121,11 @@ check('dashboard.summary returns at most 5 most recent payments', function () {
   p5LastApi = p5Api();
   p5Post(p5LastApi, 'schoolFees.create', {
     Student_ID: 'STU-1', Academic_Year: '2026/2027', Term: 'Term 1',
-    Amount_Due: 500, Amount_Paid: 500, Payment_Method: 'Cash', Payment_Date: '2026-09-01'
+    Amount_Due: 500
   });
   p5Post(p5LastApi, 'schoolFees.create', {
     Student_ID: 'STU-1', Academic_Year: '2026/2027', Term: 'Term 1',
-    Amount_Due: 500, Amount_Paid: 500, Payment_Method: 'Cash', Payment_Date: '2026-09-02'
+    Amount_Due: 500
   });
   var env = p5Post(p5LastApi, 'dashboard.summary');
   eq(env.success, true);
@@ -4892,7 +5136,7 @@ check('dashboard.summary sorts recent payments most-recent-first', function () {
   p5LastApi = p5Api();
   var env = p5Post(p5LastApi, 'dashboard.summary');
   eq(env.success, true);
-  eq(env.data.recentPayments.length, 5, '3 School_Fees + 2 Feeding_Fees fixture payments');
+  eq(env.data.recentPayments.length, 4, '2 School_Fee_Payments ledger rows + 2 Feeding_Fees fixture payments');
   ok(env.data.recentPayments[0].Payment_Date >= env.data.recentPayments[1].Payment_Date, 'payments should be descending');
   ok(env.data.recentPayments[1].Payment_Date >= env.data.recentPayments[2].Payment_Date, 'payments should be descending');
   ok(env.data.recentPayments[2].Payment_Date >= env.data.recentPayments[3].Payment_Date, 'payments should be descending');

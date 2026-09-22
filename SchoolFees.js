@@ -1,17 +1,25 @@
 /**
  * SchoolFees.js
  *
- * Handles school fee payment records.
+ * Handles school fee OBLIGATIONS (fee accounts) and, via SchoolFeePayments.js,
+ * the payment transactions recorded against them (Option 2 model).
  * Schema: Payment_ID, Student_ID, Academic_Year, Term, Amount_Due, Amount_Paid,
  *         Balance, Payment_Date, Payment_Method, Reference, Status, Recorded_By, Notes
  *
+ * ONE ROW = ONE FEE ACCOUNT for a student / academic year / term:
+ *   - Amount_Due   = the Fee Amount charged (editable; may be increased later).
+ *   - Amount_Paid  = SERVER-DERIVED: sum of non-voided School_Fee_Payments
+ *                    rows whose Fee_ID references this row. Never client-supplied.
+ *   - Balance      = SERVER-DERIVED: Amount_Due - Amount_Paid (outstanding).
+ *   - Payment_Date / Payment_Method / Reference are legacy compatibility
+ *     columns from the single-row model; new flows record them on the
+ *     School_Fee_Payments rows instead.
+ *
  * Payment_ID format: SF-001, SF-002, ... (server-generated, immutable)
- * Balance = Amount_Due - Amount_Paid (calculated server-side)
- * Amount_Paid must not exceed Amount_Due
- * Student_ID must exist and not be withdrawn for new payments
+ * Student_ID must exist and not be withdrawn for new accounts
  * Void is soft correction: Status = 'Voided', record preserved
- * Payment_ID, Balance and Recorded_By are server-controlled: a client-supplied
- * value is ignored (or rejected for Payment_ID), and unknown payload columns are
+ * Payment_ID, Amount_Paid, Balance and Recorded_By are server-controlled: a
+ * client-supplied value is ignored (or rejected for Payment_ID), and unknown payload columns are
  * rejected with VALIDATION_ERROR, matching the Phase 3 convention
  */
 
@@ -25,8 +33,7 @@ var SCHOOL_FEES_ID_COLUMN = 'Payment_ID';
 var SCHOOL_FEES_STUDENT_COLUMN = 'Student_ID';
 
 var SCHOOL_FEES_CREATE_REQUIRED = [
-  'Student_ID', 'Academic_Year', 'Term', 'Amount_Due', 'Amount_Paid',
-  'Payment_Method', 'Payment_Date'
+  'Student_ID', 'Academic_Year', 'Term', 'Amount_Due'
 ];
 
 var SCHOOL_FEES_PAYMENT_METHODS = [
@@ -130,6 +137,49 @@ function deriveSchoolFeesStatus_(amountDue, amountPaid) {
   return 'Unpaid';
 }
 
+/**
+ * Re-derive Amount_Paid/Balance/Status for the given obligation records from
+ * the payment ledger (School_Fee_Payments), reading the ledger ONCE for the
+ * whole batch. The ledger is authoritative: a stale or hand-edited
+ * Amount_Paid/Balance cell on the School_Fees row can never be served.
+ *
+ * A 'Voided' obligation keeps its Status (voiding an account is itself a
+ * correction and must stay visible as such); live accounts get
+ * Unpaid / Partial / Paid from the recomputed totals.
+ */
+function enrichSchoolFeeRecords_(records) {
+  if (!records || records.length === 0) return records;
+  var totals = {};
+  try {
+    var headers = getFeePaymentsHeaders_();
+    var sheet = getFeePaymentsSheet_();
+    var lastRow = sheet.getLastRow();
+    if (lastRow >= 2) {
+      var values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+      for (var i = 0; i < values.length; i++) {
+        var p = normalizeFeePaymentRecord_(rowToObject_(headers, values[i]));
+        if (p.Status === 'Voided') continue;
+        totals[p.Fee_ID] = (totals[p.Fee_ID] || 0) + p.Amount;
+      }
+    }
+  } catch (err) {
+    // An absent School_Fee_Payments sheet simply means nothing paid yet.
+    if (!(err && err.details && err.details.sheet === CONFIG.SHEETS.SCHOOL_FEE_PAYMENTS)) {
+      throw err;
+    }
+  }
+  for (var j = 0; j < records.length; j++) {
+    var r = records[j];
+    var paid = totals[r.Payment_ID] || 0;
+    r.Amount_Paid = paid;
+    r.Balance = r.Amount_Due - paid;
+    if (toTrimmedString_(r.Status) !== 'Voided') {
+      r.Status = deriveSchoolFeesStatus_(r.Amount_Due, paid);
+    }
+  }
+  return records;
+}
+
 function nextSchoolFeesId_() {
   var sheet = getSchoolFeesSheet_();
   var headers = getHeaders_(sheet);
@@ -154,7 +204,10 @@ function findSchoolFeeById_(id) {
   var found = findRowById_(CONFIG.SHEETS.SCHOOL_FEES, id, SCHOOL_FEES_ID_COLUMN);
   // Balance is only ever the server-side calculation, so a stale or hand-edited
   // Balance cell can never be served to (or trusted by) a caller.
-  if (found) normalizeSchoolFeesRecord_(found.record);
+  if (found) {
+    normalizeSchoolFeesRecord_(found.record);
+    enrichSchoolFeeRecords_([found.record]);
+  }
   return found;
 }
 
@@ -167,7 +220,7 @@ function readAllSchoolFees_(headers) {
   for (var i = 0; i < values.length; i++) {
     records.push(normalizeSchoolFeesRecord_(rowToObject_(headers, values[i])));
   }
-  return records;
+  return enrichSchoolFeeRecords_(records);
 }
 
 function handleSchoolFeesList_(payload) {
@@ -271,6 +324,20 @@ function handleSchoolFeesCreate_(payload) {
   assertRequired_(payload, SCHOOL_FEES_CREATE_REQUIRED);
   assertKnownSchoolFeesFields_(getSchoolFeesHeaders_(), payload);
 
+  // Creating an account records an OBLIGATION only. Money received is a
+  // School_Fee_Payments row created via feePayments.create against this
+  // account, so legacy payment fields are rejected rather than silently
+  // double-tracked on the account row.
+  ['Amount_Paid', 'Payment_Method', 'Payment_Date'].forEach(function (field) {
+    if (payload[field] !== undefined) {
+      throwError_(
+        field + ' belongs to payment transactions. Record money received via feePayments.create against this fee account.',
+        ERROR_CODES.VALIDATION_ERROR,
+        { field: field, reason: 'use-feePayments-create' }
+      );
+    }
+  });
+
   var studentId = toTrimmedString_(payload.Student_ID);
   validateStudentForPayment_(studentId, false);
 
@@ -283,49 +350,14 @@ function handleSchoolFeesCreate_(payload) {
     );
   }
 
-  var amountPaid = Number(payload.Amount_Paid);
-  if (isNaN(amountPaid) || amountPaid < 0) {
-    throwError_(
-      'Amount_Paid must be a non-negative number.',
-      ERROR_CODES.VALIDATION_ERROR,
-      { field: 'Amount_Paid', value: payload.Amount_Paid }
-    );
-  }
+  // A brand-new obligation has received no money yet. Payments are recorded
+  // exclusively through feePayments.create against this account.
+  var amountPaid = 0;
 
-  if (amountPaid > amountDue) {
-    throwError_(
-      'Amount_Paid (' + amountPaid + ') cannot exceed Amount_Due (' + amountDue + ').',
-      ERROR_CODES.VALIDATION_ERROR,
-      { field: 'Amount_Paid', value: amountPaid, reason: 'amount-paid-exceeds-due' }
-    );
-  }
-
-  var paymentMethod = toTrimmedString_(payload.Payment_Method);
-  if (SCHOOL_FEES_PAYMENT_METHODS.indexOf(paymentMethod) === -1) {
-    throwError_(
-      'Invalid Payment_Method: ' + paymentMethod,
-      ERROR_CODES.VALIDATION_ERROR,
-      { field: 'Payment_Method', value: paymentMethod, allowedValues: SCHOOL_FEES_PAYMENT_METHODS }
-    );
-  }
-
-  var paymentDate = toTrimmedString_(payload.Payment_Date);
-  if (!paymentDate) {
-    throwError_(
-      'Payment_Date is required.',
-      ERROR_CODES.VALIDATION_ERROR,
-      { field: 'Payment_Date' }
-    );
-  }
-  var parsedDate = toDate_(paymentDate);
-  if (!parsedDate) {
-    throwError_(
-      'Invalid Payment_Date: ' + paymentDate,
-      ERROR_CODES.VALIDATION_ERROR,
-      { field: 'Payment_Date', value: paymentDate }
-    );
-  }
-  paymentDate = formatDate_(parsedDate);
+  // Legacy compatibility columns from the single-row model. New flows record
+  // method/date/reference on the School_Fee_Payments rows instead.
+  var paymentMethod = '';
+  var paymentDate = formatDate_(now_());
 
   var academicYear = toTrimmedString_(payload.Academic_Year);
   if (!academicYear) {
@@ -376,7 +408,7 @@ function handleSchoolFeesCreate_(payload) {
     }
     var sheet = getSchoolFeesSheet_();
     var created = appendRow_(CONFIG.SHEETS.SCHOOL_FEES, record);
-    return success(created, 'School fee payment created');
+    return success(created, 'School fee account created');
   });
 }
 
@@ -470,7 +502,6 @@ function handleSchoolFeesUpdate_(payload) {
     }
 
     var amountDue = current.Amount_Due;
-    var amountPaid = current.Amount_Paid;
 
     if (payload.Amount_Due !== undefined) {
       amountDue = Number(payload.Amount_Due);
@@ -483,28 +514,31 @@ function handleSchoolFeesUpdate_(payload) {
       }
     }
 
+    // Amount_Paid/Balance are server-derived from the payment ledger and can
+    // never be set by a client. Increasing the Fee Amount is allowed (a fee
+    // increase recalculates Outstanding without touching payment history);
+    // reducing it below Total Paid would corrupt the account, so it is
+    // rejected for MVP1 (no credit/overpayment concept).
     if (payload.Amount_Paid !== undefined) {
-      amountPaid = Number(payload.Amount_Paid);
-      if (isNaN(amountPaid) || amountPaid < 0) {
-        throwError_(
-          'Amount_Paid must be a non-negative number.',
-          ERROR_CODES.VALIDATION_ERROR,
-          { field: 'Amount_Paid', value: payload.Amount_Paid }
-        );
-      }
+      throwError_(
+        'Amount_Paid is server-derived from recorded payments and cannot be set directly.',
+        ERROR_CODES.VALIDATION_ERROR,
+        { field: 'Amount_Paid', reason: 'server-derived-field' }
+      );
     }
 
-    if (amountPaid > amountDue) {
+    var totalPaid = computeFeeTotalPaid_(current.Payment_ID);
+    if (amountDue < totalPaid) {
       throwError_(
-        'Amount_Paid (' + amountPaid + ') cannot exceed Amount_Due (' + amountDue + ').',
+        'Fee Amount (' + amountDue + ') cannot be less than Total Paid (' + totalPaid + ').',
         ERROR_CODES.VALIDATION_ERROR,
-        { field: 'Amount_Paid', value: amountPaid, reason: 'amount-paid-exceeds-due' }
+        { field: 'Amount_Due', value: amountDue, totalPaid: totalPaid, reason: 'fee-below-total-paid' }
       );
     }
 
     updated.Amount_Due = amountDue;
-    updated.Amount_Paid = amountPaid;
-    updated.Balance = amountDue - amountPaid;
+    updated.Amount_Paid = totalPaid;
+    updated.Balance = amountDue - totalPaid;
 
     if (payload.Payment_Date !== undefined) {
       var pd = toTrimmedString_(payload.Payment_Date);
@@ -559,7 +593,7 @@ function handleSchoolFeesUpdate_(payload) {
       }
       updated.Status = s;
     } else {
-      updated.Status = deriveSchoolFeesStatus_(amountDue, amountPaid);
+      updated.Status = deriveSchoolFeesStatus_(amountDue, totalPaid);
     }
 
     updated.Recorded_By = current.Recorded_By;
