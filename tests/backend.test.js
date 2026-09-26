@@ -1131,7 +1131,7 @@ check('health reports missing tabs as a data issue without failing', function ()
 
   eq(envelope.success, true, 'missing tabs should not make the service unhealthy');
   eq(envelope.data.sheets, ['Students', 'Staff'], 'sheets must be the tabs that really exist');
-  eq(envelope.data.missingSheets.length, 12);
+  eq(envelope.data.missingSheets.length, 13);
   ok(envelope.data.missingSheets.indexOf('Audit_Log') !== -1, 'missingSheets should name the absent tabs');
 });
 
@@ -2765,9 +2765,6 @@ check('schoolFees.create: Recorded_By comes from authenticated user, not client'
     Academic_Year: '2025/2026',
     Term: 'Term 1',
     Amount_Due: 1000,
-    Amount_Paid: 0,
-    Payment_Method: 'Bank Transfer',
-    Payment_Date: '2025-09-20',
     Reference: 'TEST-002',
     Recorded_By: 'EVIL-STF-999'
   };
@@ -2883,10 +2880,7 @@ check('schoolFees.create: nonexistent Student_ID is rejected', function () {
     Student_ID: 'STU-999',
     Academic_Year: '2025/2026',
     Term: 'Term 1',
-    Amount_Due: 1000,
-    Amount_Paid: 0,
-    Payment_Method: 'Cash',
-    Payment_Date: '2025-09-20'
+    Amount_Due: 1000
   };
   const env = JSON.parse(apiA.doPost({
     parameter: { action: 'schoolFees.create' },
@@ -2902,10 +2896,7 @@ check('schoolFees.create: withdrawn student is rejected', function () {
     Student_ID: 'STU-3',
     Academic_Year: '2025/2026',
     Term: 'Term 1',
-    Amount_Due: 1000,
-    Amount_Paid: 0,
-    Payment_Method: 'Cash',
-    Payment_Date: '2025-09-20'
+    Amount_Due: 1000
   };
   const env = JSON.parse(apiA.doPost({
     parameter: { action: 'schoolFees.create' },
@@ -2953,23 +2944,14 @@ check('schoolFees.create: missing Term is rejected', function () {
   eq(env.error, 'VALIDATION_ERROR');
 });
 
-check('schoolFees.create: invalid Payment_Method is rejected', function () {
+check('feePayments.create: invalid Payment_Method is rejected', function () {
   const apiA = loadBackendAs('admin@school.edu');
-  const payload = {
-    Student_ID: 'STU-2',
-    Academic_Year: '2025/2026',
-    Term: 'Term 1',
-    Amount_Due: 1000,
-    Amount_Paid: 0,
-    Payment_Method: 'Bitcoin',
-    Payment_Date: '2025-09-20'
-  };
-  const env = JSON.parse(apiA.doPost({
-    parameter: { action: 'schoolFees.create' },
-    postData: { contents: JSON.stringify({ action: 'schoolFees.create', payload: payload }) }
-  }).getContent());
+  const fee = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload());
+  eq(fee.success, true, 'a valid fee obligation must be created first: ' + (fee.message || fee.error));
+  const env = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Fee_ID: fee.data.Payment_ID, Payment_Method: 'Bitcoin' }));
   eq(env.success, false);
   eq(env.error, 'VALIDATION_ERROR');
+  eq(env.details && env.details.field, 'Payment_Method', 'the error must name Payment_Method');
   ok(env.details && Array.isArray(env.details.allowedValues), 'should list allowed payment methods');
 });
 
@@ -3173,20 +3155,22 @@ check('schoolFees.list combines filters', function () {
 
 section('Phase 4B: School Fees — update');
 
-check('schoolFees.update performs a partial update and recalculates Balance', function () {
+check('schoolFees.update reflects ledger-derived Partial after a partial fee payment', function () {
   const apiA = loadBackendAs('admin@school.edu');
-  const payload = { Payment_ID: 'SF-003', Amount_Due: 600 };
-  const env = JSON.parse(apiA.doPost({
-    parameter: { action: 'schoolFees.update' },
-    postData: { contents: JSON.stringify({ action: 'schoolFees.update', payload: payload }) }
-  }).getContent());
+  const fee = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload({ Amount_Due: 1000 }));
+  eq(fee.success, true, 'a valid fee obligation must be created first: ' + (fee.message || fee.error));
+  const feeId = fee.data.Payment_ID;
+  const payment = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Fee_ID: feeId, Amount: 400 }));
+  eq(payment.success, true, 'a partial ledger payment must be recorded first: ' + (payment.message || payment.error));
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: feeId, Reference: 'UPDATED-REF' });
   eq(env.success, true, env.message || env.error);
   if (env.success) {
-    eq(env.data.Payment_ID, 'SF-003');
-    eq(env.data.Amount_Due, 600, 'Fee Amount must be editable');
-    eq(env.data.Amount_Paid, 0, 'Total Paid is server-derived from the ledger');
+    eq(env.data.Payment_ID, feeId);
+    eq(env.data.Amount_Due, 1000, 'Fee Amount must be preserved');
+    eq(env.data.Amount_Paid, 400, 'Total Paid is server-derived from the ledger');
     eq(env.data.Balance, 600, 'Outstanding must be recalculated');
     eq(env.data.Status, 'Partial');
+    eq(env.data.Reference, 'UPDATED-REF', 'the legitimate update must be applied');
   }
 });
 
@@ -4049,13 +4033,20 @@ check('Phase 4B: feedingFees writes respect script locking', function () {
 check('Phase 4B: schoolFees.update decides and writes inside the script lock', function () {
   const ss = makeFullSpreadsheet();
   const apiA = loadBackendAs('admin@school.edu', ss);
+  const fee = doPostEnvelope(apiA, 'schoolFees.create', sfCreatePayload({ Amount_Due: 1000 }));
+  eq(fee.success, true, 'a valid fee obligation must be created first: ' + (fee.message || fee.error));
+  const feeId = fee.data.Payment_ID;
+  const payment = doPostEnvelope(apiA, 'feePayments.create', fpCreatePayload({ Fee_ID: feeId, Amount: 400 }));
+  eq(payment.success, true, 'a partial ledger payment must be recorded first: ' + (payment.message || payment.error));
   const statusCol = feeColIndex(ss, 'School_Fees', 'Status');
-  const row = feeRowOf(ss, 'School_Fees', 'SF-003');
+  const row = feeRowOf(ss, 'School_Fees', feeId);
   const log = observeSheetAccess(apiA, 'School_Fees');
 
-  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: 'SF-003', Amount_Due: 600 });
+  const env = doPostEnvelope(apiA, 'schoolFees.update', { Payment_ID: feeId, Reference: 'LOCKED-REF' });
   eq(env.success, true, 'the update should succeed');
   eq(env.data.Status, 'Partial', 'the recalculated status must be derived from the ledger');
+  eq(env.data.Amount_Paid, 400, 'Total Paid is server-derived from the ledger');
+  eq(env.data.Balance, 600, 'Outstanding must be recalculated');
   eq(apiA.__lockDepth, 0, 'the critical section must be released before the response is returned');
 
   const reads = fullRowReads(log, row);
@@ -4063,8 +4054,8 @@ check('Phase 4B: schoolFees.update decides and writes inside the script lock', f
   reads.forEach(function (entry) {
     ok(entry.depth > 0, 'the stored row must never be read outside the critical section');
   });
-  eq(reads[0].values[0][statusCol], 'Unpaid',
-    'the deciding read must be the stored pre-update row (Unpaid), read under the lock');
+  eq(reads[0].values[0][statusCol], 'Partial',
+    'the deciding read must be the stored pre-update row (Partial), read under the lock');
   eq(reads[1].values[0][statusCol], 'Partial', 'the refresh read must see the recalculated status');
 
   const writes = log.filter(function (entry) { return entry.op === 'write'; });
